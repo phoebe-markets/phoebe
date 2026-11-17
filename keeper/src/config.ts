@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { createPublicClient, createTestClient, createWalletClient, http, type Abi, type Address } from "viem";
+import { createPublicClient, createTestClient, createWalletClient, http, parseGwei, type Abi, type Address, type Hex } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
 import { foundry, polygon, polygonAmoy } from "viem/chains";
 
@@ -74,6 +74,27 @@ export function clients(rpcUrl = process.env.RPC_URL ?? "http://127.0.0.1:8545",
 export const LOG_CHUNK = BigInt(process.env.LOG_CHUNK ?? 2000);
 
 export type Clients = ReturnType<typeof clients>;
+
+/**
+ * Polygon PoS (mainnet and Amoy) nodes reject priority tips under 25 gwei, below what viem estimates when the chain
+ * is quiet. Suggest an explicit tip there (MIN_TIP_GWEI, default 30); elsewhere let viem estimate.
+ */
+export async function fees(c: Clients) {
+  const id = c.pub.chain?.id;
+  if (id !== polygon.id && id !== polygonAmoy.id) return {};
+  const tip = parseGwei(process.env.MIN_TIP_GWEI ?? "30");
+  const base = (await c.pub.getBlock()).baseFeePerGas ?? 0n;
+  return { maxPriorityFeePerGas: tip, maxFeePerGas: base * 2n + tip };
+}
+
+/** Simulate, send with chain-appropriate fees, wait. Throws on revert. */
+export async function send(c: Clients, call: { address: Address; abi: Abi; functionName: string; args?: readonly unknown[] }) {
+  const { request } = await c.pub.simulateContract({ account: c.account, ...call } as never);
+  const hash: Hex = await c.wallet.writeContract({ ...(request as object), ...(await fees(c)) } as never);
+  const r = await c.pub.waitForTransactionReceipt({ hash });
+  if (r.status !== "success") throw new Error(`${call.functionName} reverted (${hash})`);
+  return r;
+}
 
 /**
  * Market i's YES / NO token ids. Deployments list them in `tokenIds` (YES, NO per market; Polymarket's 256-bit ids on

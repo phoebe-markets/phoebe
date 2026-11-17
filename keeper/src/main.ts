@@ -14,14 +14,21 @@
  *   Live pushes are throttled for testnet gas: a market is pushed when its price moves >= min-move, and every market
  *   at least once per heartbeat (seconds). Keep the heartbeat under KeeperVenue.maxPriceAge.
  *
+ * Mainnet (deployment with the real CTF): the keeper also runs the hedger (hedger.ts) every tick. It only LOGS the
+ * orders, splits and venue switches it would make unless started with --hedge-live (or HEDGE_LIVE=1).
+ *   DEPLOYMENT=polygon RPC_URL=... KEEPER_PK=... bun keeper/src/main.ts live --interval 15 --min-move 0.002 --heartbeat 300
+ *   --ssh <host> / --socks <host:port>: route Polymarket API traffic (hedger + geoblock check) through a proxy.
+ *
  * Env: DEPLOYMENT (default local), RPC_URL (default http://127.0.0.1:8545), KEEPER_PK (default Anvil account #1),
- *      COOL_OFF_SECONDS (21600)
+ *      COOL_OFF_SECONDS (21600), hedger limits (see hedger.ts)
  */
 import { clients, loadDeployment, log } from "./config";
 import { PolymarketFeed, ReplayFeed, describe, pushPrices } from "./oracle";
 import { RiskKeeper } from "./risk";
 import { DemoTraders } from "./traders";
 import { Maker } from "./maker";
+import { Hedger, configFromEnv } from "./hedger";
+import { setupEgress } from "./polymarket";
 
 const args = process.argv.slice(2);
 const mode = args[0];
@@ -31,6 +38,7 @@ const flag = (name: string, dflt: number) => {
 };
 const positional: string[] = [];
 for (let i = 1; i < args.length; i++) {
+  if (args[i] === "--hedge-live") continue; // boolean flag
   if (args[i].startsWith("--")) i++; // skip the flag's value
   else positional.push(args[i]);
 }
@@ -60,6 +68,18 @@ log(`keeper up: ${mode}, ${d.markets} market(s), keeper ${c.account.address}`);
 
 const maker = d.venueType === "keeper" ? new Maker(c, d) : undefined;
 if (maker) await maker.setup();
+
+// Real CTF + keeper venue: hedge the maker's inventory on Polymarket
+let hedger: Hedger | undefined;
+if (mode === "live" && d.venueType === "keeper" && d.mockCtf === false) {
+  const opt = (f: string) => (args.includes(`--${f}`) ? args[args.indexOf(`--${f}`) + 1] : "");
+  await setupEgress({ ssh: opt("ssh"), socks: opt("socks") || process.env.CLOB_SOCKS });
+  const live = args.includes("--hedge-live") || process.env.HEDGE_LIVE === "1";
+  hedger = new Hedger(c, d, configFromEnv(live));
+  await hedger.init();
+  if (live) await hedger.setup();
+  log(`hedger up (${live ? "LIVE: will post Polymarket orders" : "dry run: logs only; --hedge-live to trade"})`);
+}
 
 const traderEvery = flag("traders", 0);
 const traders = traderEvery > 0 ? new DemoTraders(c, d) : undefined;
@@ -96,6 +116,7 @@ for (;;) {
     log(`tick failed, retrying next interval: ${(e as Error).message.split("\n")[0]}`); // RPC/API hiccups mustn't kill a live keeper
   }
   if (traders && n % traderEvery === 0) await traders.step(n);
+  if (hedger) await hedger.tick().catch((e) => log(`hedger tick failed: ${(e as Error).message.split("\n")[0]}`));
   if (maker && n % 20 === 19) await maker.restock().catch((e) => log(`maker restock failed: ${(e as Error).message.split("\n")[0]}`));
   if (++n % 50 === 0 || mode === "live") {
     const when = step.timestamp ? new Date(Number(step.timestamp) * 1000).toISOString().slice(0, 16) : "now";

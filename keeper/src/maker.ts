@@ -8,7 +8,7 @@ const USD = 1_000_000n;
  * USDC from this wallet via approvals; this keeps both approved and stocked.
  *
  * Inventory: on testnets the keeper may mint mock outcome tokens (MockCTF minter role), standing in for buying them on
- * Polymarket. On mainnet this is where the keeper would rebalance on the CLOB from its own EOA.
+ * Polymarket. On mainnet hedger.ts stocks inventory (adapter splits) and hedges on the CLOB instead.
  */
 export class Maker {
   private extra = ABI_EXTRA();
@@ -34,6 +34,7 @@ export class Maker {
 
   /** Top inventory and USDC back up to target (seized shares from liquidations also land here). */
   async restock() {
+    if (this.d.mockCtf === false) return; // real outcome tokens: the hedger stocks inventory (split pUSD)
     const me = this.c.account.address;
     for (let i = 0; i < this.d.markets; i++) {
       for (const id of [yesId(this.d, i), noId(this.d, i)]) {
