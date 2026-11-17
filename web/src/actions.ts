@@ -1,5 +1,6 @@
 import { BaseError, ContractFunctionRevertedError, maxUint256, type Abi, type Address } from "viem";
 import { pub, type Abis, type Deployment, type Wallet } from "./chain";
+import { lastWalletFailure } from "./walletTrace";
 
 const USD = 1_000_000;
 export const toUsdc = (x: number) => BigInt(Math.round(x * USD));
@@ -21,10 +22,18 @@ const REASONS: Record<string, string> = {
 };
 
 export function explain(e: unknown): string {
-  // wallet (EIP-1193) errors: keep the code so problems are diagnosable
+  // wallet (EIP-1193) errors: name the wallet, the call it refused, and its own message
   const code = (e as { code?: number }).code ?? (e as { cause?: { code?: number } }).cause?.code;
-  if (code === 4001) return "You rejected the request in your wallet";
-  if (code === 4100) return "Your wallet hasn't authorized this site for this account/network. Reconnect and approve Polygon Amoy (4100)";
+  const f = lastWalletFailure();
+  const where = f ? ` [${f.wallet} refused ${f.method}${f.code !== undefined ? `, code ${f.code}` : ""}: "${f.message}"]` : "";
+  if (code === 4001 || f?.code === 4001) return `You rejected the request in your wallet${where}`;
+  if (code === 4100 || f?.code === 4100) {
+    return `Your wallet hasn't authorized this site for this account or network${where}. ` +
+      "If that isn't MetaMask, disconnect and use Connect MetaMask; in MetaMask, check the site is connected to this account and to Polygon Amoy.";
+  }
+  if (f && !(e instanceof BaseError && e.walk((x) => x instanceof ContractFunctionRevertedError))) {
+    return `${(e as { shortMessage?: string }).shortMessage ?? (e as Error).message}${where}`;
+  }
   if (e instanceof BaseError) {
     const r = e.walk((x) => x instanceof ContractFunctionRevertedError);
     if (r instanceof ContractFunctionRevertedError) {

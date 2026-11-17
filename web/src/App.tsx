@@ -3,6 +3,7 @@ import { useAccount, useConnect, useDisconnect, useSwitchChain } from "wagmi";
 import { getWalletClient } from "@wagmi/core";
 import { polygonAmoy } from "viem/chains";
 import { wagmiConfig } from "./wagmi";
+import { NON_EVM_HINT, traceProvider } from "./walletTrace";
 import {
   CFG,
   DEMO_ACCOUNTS,
@@ -55,7 +56,11 @@ function useTheme(): [Theme, (t: Theme) => void] {
 function useWallet() {
   const [demoIdx, setDemoIdx] = useState(0);
   const demo = useMemo(() => (CFG.wallet === "demo" ? demoWallet(DEMO_ACCOUNTS[demoIdx].pk) : null), [demoIdx]);
-  const { address, chainId, isConnected } = useAccount();
+  const { address, chainId, isConnected, connector } = useAccount();
+  // record every request the connected wallet handles (see walletTrace.ts)
+  useEffect(() => {
+    if (connector) connector.getProvider().then((p) => traceProvider(p, connector.name), () => {});
+  }, [connector]);
   const { connectors, connectAsync, isPending } = useConnect();
   const { disconnect } = useDisconnect();
   const { switchChainAsync } = useSwitchChain();
@@ -84,9 +89,14 @@ function useWallet() {
   }, [demo, isConnected, chainId, switchChainAsync]);
 
   // EIP-6963 discovery lists every installed wallet; fall back to the generic injected connector
-  const wallets = connectors.filter((c) => c.type === "injected" && (c.id !== "injected" || connectors.length === 1));
+  // MetaMask / Rabby first; wallets for other ecosystems last (they often refuse EVM testnets like Amoy)
+  const rank = (n: string) => (/metamask/i.test(n) ? 0 : /rabby/i.test(n) ? 1 : NON_EVM_HINT.test(n) ? 9 : 5);
+  const wallets = connectors
+    .filter((c) => c.type === "injected" && (c.id !== "injected" || connectors.length === 1))
+    .sort((a, b) => rank(a.name) - rank(b.name));
   return {
     address: demo ? demo.account.address : isConnected ? (address ?? null) : null,
+    walletName: demo ? "demo account" : connector?.name,
     wrongChain: !demo && isConnected && chainId !== polygonAmoy.id,
     getWallet,
     demoIdx,
@@ -180,7 +190,9 @@ export function App() {
           </select>
         ) : address ? (
           <>
-            <a className="chip" href={`${CFG.explorer}/address/${address}`} target="_blank" rel="noreferrer">{shortAddr(address)}</a>
+            <a className="chip" href={`${CFG.explorer}/address/${address}`} target="_blank" rel="noreferrer">
+              {shortAddr(address)} · via {w.walletName}
+            </a>
             <button className="btn ghost" onClick={w.disconnect}>Disconnect</button>
           </>
         ) : w.wallets.length === 0 ? (
@@ -189,7 +201,7 @@ export function App() {
           w.wallets.map((c) => (
             <button key={c.uid} className="btn" style={{ width: "auto", padding: "6px 14px" }} disabled={w.connecting}
               onClick={() => w.connect(c.id)}>
-              {w.connecting ? "Connecting…" : `Connect ${c.name === "Injected" ? "wallet" : c.name}`}
+              {w.connecting ? "Connecting…" : `Connect ${c.name === "Injected" ? "wallet" : c.name}${NON_EVM_HINT.test(c.name) ? " (may not support Amoy)" : ""}`}
             </button>
           ))
         )}
