@@ -74,3 +74,53 @@ contract FeesTest is Base {
         pm.setFees(0, 1_001);
     }
 }
+
+contract ClusterTest is Base {
+    uint256 constant NO_ID = 2;
+
+    function setUp() public override {
+        super.setUp();
+        oracle.setPrice(NO_ID, 0.5e18);
+        risk.listMarket(
+            NO_ID,
+            RiskEngineMarketLib.cfg(resolution)
+        );
+        uint256[] memory ids = new uint256[](2);
+        (ids[0], ids[1]) = (YES, NO_ID);
+        risk.setCluster(ids, 7);
+        risk.setClusterCap(7, 5_000 * USD);
+    }
+
+    function test_clusterCapSpansMarkets() public {
+        _open(1_000 * USD, 2_000 * USD); // YES: 2k
+        vm.prank(trader);
+        pm.open(NO_ID, 1_000 * USD, 2_000 * USD, 0); // NO: 2k -> cluster 4k
+        vm.prank(trader);
+        vm.expectRevert(PositionManager.ClusterCapExceeded.selector);
+        pm.open(NO_ID, 1_000 * USD, 2_000 * USD, 0); // would be 6k > 5k
+    }
+
+    function test_clusterDebtReleasedOnClose() public {
+        uint256 id = _open(1_000 * USD, 2_000 * USD);
+        vm.prank(trader);
+        pm.close(id, 0);
+        assertEq(pm.clusterScaledDebt(7), 0);
+    }
+}
+
+import {RiskEngine} from "../src/RiskEngine.sol";
+
+library RiskEngineMarketLib {
+    function cfg(uint64 resolution) internal pure returns (RiskEngine.Market memory) {
+        return RiskEngine.Market({
+            listed: true,
+            openEnabled: true,
+            liqLtvBps: 8_500,
+            openBufferBps: 1_000,
+            resolutionTime: resolution,
+            cutoffDuration: 1 days,
+            rampDuration: 3 days,
+            borrowCap: 500_000 * 1e6
+        });
+    }
+}

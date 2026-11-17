@@ -113,7 +113,11 @@ for (const m of candidates) {
     }
 
     const resolutionTime = Math.floor(Date.parse(m.endDate) / 1000);
-    writeFileSync(out, JSON.stringify({ name: m.slug, tokenId: tokens[0], t, p, resolutionTime }));
+    // Lifetime average daily volume (USD). The only liquidity proxy available historically; the backtest's
+    // liquidators use it for price impact, and borrow caps can be sized from it.
+    const lifeDays = Math.max(1, (closed - startMkt) / 86400);
+    const dailyVolume = Math.round((m.volumeNum ?? 0) / lifeDays);
+    writeFileSync(out, JSON.stringify({ name: m.slug, tokenId: tokens[0], t, p, resolutionTime, dailyVolume }));
 
     let maxJump = 0;
     for (let i = 1; i < p.length - 1; i++) maxJump = Math.max(maxJump, Math.abs(p[i] - p[i - 1]));
@@ -122,6 +126,7 @@ for (const m of candidates) {
       question: m.question,
       event: m.events?.[0]?.title ?? "",
       volume: Math.round(m.volumeNum ?? 0),
+      dailyVolume,
       resolvedYes: prices[0] === 1,
       scheduledEnd: m.endDate,
       closedTime: m.closedTime,

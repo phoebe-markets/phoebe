@@ -5,3 +5,4 @@ node_modules/
 .env
 sim/out/*
 !sim/out/.gitkeep
+sim/data/clusters/

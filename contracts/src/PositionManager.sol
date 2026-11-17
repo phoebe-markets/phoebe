@@ -64,8 +64,18 @@ contract PositionManager is ERC1155Holder, Ownable, ReentrancyGuard {
     uint256 public nextId = 1;
     mapping(uint256 => Position) public positions;
     mapping(uint256 => uint256) public marketScaledDebt;
+    mapping(uint32 => uint256) public clusterScaledDebt;
     /// @notice Leftover shares from liquidations, claimed by pulling (so a non-receiver owner can't block liquidation).
     mapping(address => mapping(uint256 => uint256)) public claimableShares;
+
+    /// @notice If set, underwater positions can't be fire-sold to liquidators. They're absorbed instead: the debt
+    ///         is written off against junior immediately (conservative NAV), and the shares go to `inventory`.
+    ///         The shares are later redeemed at resolution, or sold when the book is healthy, and the proceeds go
+    ///         back to junior. Outcome-token prices are ~martingales, so holding has the same expected value as
+    ///         selling now, minus the liquidation discount and minus slippage into a book that just crashed.
+    bool public absorbUnderwater;
+    mapping(uint256 => uint256) public inventory;
+    mapping(address => bool) public keepers;
 
     event Opened(
         uint256 indexed id, address indexed owner, uint256 indexed tokenId, uint256 margin, uint256 borrowed, uint256 shares
@@ -82,16 +92,22 @@ contract PositionManager is ERC1155Holder, Ownable, ReentrancyGuard {
         uint256 badDebt
     );
     event SharesClaimed(address indexed owner, uint256 indexed tokenId, uint256 shares);
+    event Absorbed(uint256 indexed id, uint256 indexed tokenId, uint256 debt, uint256 shares, uint256 markValue);
+    event InventorySold(uint256 indexed tokenId, uint256 shares, uint256 proceeds);
 
     error NotOwner();
     error OpenNotAllowed();
     error StalePrice();
     error LtvTooHigh();
     error BorrowCapExceeded();
+    error ClusterCapExceeded();
     error Underwater();
     error Healthy();
     error NoPosition();
     error ZeroAmount();
+    error NotUnderwater();
+    error UseAbsorb();
+    error NotKeeper();
 
     constructor(
         IERC20 _usdc,
@@ -123,6 +139,14 @@ contract PositionManager is ERC1155Holder, Ownable, ReentrancyGuard {
     function setParams(uint256 _liquidationBonusBps, uint256 _maxPriceAge) external onlyOwner {
         require(_liquidationBonusBps <= 2_000, "bonus");
         (liquidationBonusBps, maxPriceAge) = (_liquidationBonusBps, _maxPriceAge);
+    }
+
+    function setAbsorbUnderwater(bool on) external onlyOwner {
+        absorbUnderwater = on;
+    }
+
+    function setKeeper(address who, bool allowed) external onlyOwner {
+        keepers[who] = allowed;
     }
 
     function setFees(uint256 _openFeeBps, uint256 _liquidationFeeBps) external onlyOwner {
@@ -164,6 +188,11 @@ contract PositionManager is ERC1155Holder, Ownable, ReentrancyGuard {
             uint256 mktDebt = (marketScaledDebt[tokenId] + scaled).mulDiv(pool.borrowIndex(), RAY);
             if (mktDebt > risk.borrowCap(tokenId)) revert BorrowCapExceeded();
             marketScaledDebt[tokenId] += scaled;
+            uint32 c = risk.clusterOf(tokenId);
+            if (c != 0) {
+                clusterScaledDebt[c] += scaled;
+                if (clusterScaledDebt[c].mulDiv(pool.borrowIndex(), RAY) > risk.clusterCap(c)) revert ClusterCapExceeded();
+            }
         }
 
         uint256 spend = margin + borrowAmount;
@@ -196,6 +225,8 @@ contract PositionManager is ERC1155Holder, Ownable, ReentrancyGuard {
 
         p.scaledDebt -= scaledRepay;
         marketScaledDebt[p.tokenId] -= scaledRepay;
+        uint32 c = risk.clusterOf(p.tokenId);
+        if (c != 0) clusterScaledDebt[c] -= scaledRepay;
         emit MarginAdded(id, owed);
     }
 
@@ -254,6 +285,7 @@ contract PositionManager is ERC1155Holder, Ownable, ReentrancyGuard {
             seized = sharesForDebt;
             toOwner = p.shares - seized;
         } else {
+            if (absorbUnderwater) revert UseAbsorb();
             // Underwater: everything recovered goes to the debt, no protocol fee.
             seized = p.shares;
             paid = h.value.mulDiv(BPS, BPS + liquidationBonusBps);
@@ -275,6 +307,49 @@ contract PositionManager is ERC1155Holder, Ownable, ReentrancyGuard {
         ctf.safeTransferFrom(address(this), msg.sender, p.tokenId, seized, "");
 
         emit Liquidated(id, msg.sender, h.debt, paid, seized, toOwner, badDebt);
+    }
+
+    /// @notice Absorb an underwater position (collateral at oracle < debt * (1 + bonus + fee)) into the backstop
+    ///         inventory. Permissionless. The trader has already lost their margin, and the LPs keep the
+    ///         shares' upside instead of selling them at the bottom.
+    function absorb(uint256 id) external nonReentrant {
+        if (!absorbUnderwater) revert UseAbsorb();
+        Position memory p = positions[id];
+        if (p.owner == address(0)) revert NoPosition();
+        pool.accrue();
+
+        Health memory h = _health(p, pool.borrowIndex());
+        if (!h.liquidatable) revert Healthy();
+        uint256 premium = liquidationBonusBps + liquidationFeeBps;
+        if (h.priceWad > 0 && h.debt.mulDiv((BPS + premium) * WAD, BPS * h.priceWad) <= p.shares) revert NotUnderwater();
+
+        _clear(id, p);
+        pool.writeOff(p.scaledDebt, 0);
+        inventory[p.tokenId] += p.shares;
+        emit Absorbed(id, p.tokenId, h.debt, p.shares, h.value);
+    }
+
+    /// @notice Sell backstop inventory through the venue (after resolution, or once the book has recovered).
+    ///         Proceeds go to the pool's junior tranche. Keeper-gated: the timing is a judgement call.
+    function sellInventory(uint256 tokenId, uint256 shares, uint256 minUsdcOut)
+        external
+        nonReentrant
+        returns (uint256 proceeds)
+    {
+        if (!keepers[msg.sender] && msg.sender != owner()) revert NotKeeper();
+        inventory[tokenId] -= shares;
+        proceeds = venue.sell(tokenId, shares, minUsdcOut);
+        if (proceeds > 0) {
+            usdc.forceApprove(address(pool), proceeds);
+            pool.donate(proceeds);
+        }
+        emit InventorySold(tokenId, shares, proceeds);
+    }
+
+    /// @notice Inventory marked at the oracle price (USDC). Off-book: junior NAV excludes it until it's realized.
+    function inventoryValue(uint256 tokenId) external view returns (uint256) {
+        (uint256 price,) = oracle.getPrice(tokenId);
+        return inventory[tokenId].mulDiv(price, WAD);
     }
 
     // ------------------------------------------------------------------ views
@@ -311,6 +386,8 @@ contract PositionManager is ERC1155Holder, Ownable, ReentrancyGuard {
 
     function _clear(uint256 id, Position memory p) internal {
         marketScaledDebt[p.tokenId] -= p.scaledDebt;
+        uint32 c = risk.clusterOf(p.tokenId);
+        if (c != 0) clusterScaledDebt[c] -= p.scaledDebt;
         delete positions[id];
     }
 }

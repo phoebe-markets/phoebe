@@ -2,6 +2,7 @@
 pragma solidity ^0.8.24;
 
 import {Test, console} from "forge-std/Test.sol";
+import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 import {IERC1155} from "@openzeppelin/contracts/token/ERC1155/IERC1155.sol";
 import {ERC1155Holder} from "@openzeppelin/contracts/token/ERC1155/utils/ERC1155Holder.sol";
 
@@ -55,6 +56,11 @@ contract Replay is Test, ERC1155Holder {
         uint256 baseRate; // WAD/yr
         uint256 slope1;
         uint256 attentiveBps; // 0 = lazy traders. Else: close voluntarily once LTV >= this fraction of liq LTV
+        uint256 slipY; // liquidator price impact: slip = Y * sqrt(sold / dailyVolume), Y in bps. 0 = infinite depth
+        uint256 capDvBps; // per-market borrow cap as bps of daily volume. 0 = cap at LP size
+        bool absorb; // underwater positions go to backstop inventory instead of being fire-sold
+        uint256 invHold; // keeper sells each absorbed lot this long after absorbing (0 = hold to resolution)
+        uint256 clusterCapBps; // multi-market files: cap on total debt across all markets, bps of LP. 0 = none
     }
 
     struct World {
@@ -80,6 +86,12 @@ contract Replay is Test, ERC1155Holder {
         uint256 openFees;
         uint256 unprofitableLiqs; // liquidatable, but no rational liquidator would act (lagging oracle)
         uint256 defensiveCloses; // attentive traders bailing out before liquidation
+        uint256 absorbed; // count
+        uint256 absorbedDebt; // written off at absorb time
+        uint256 recovered; // inventory sale proceeds
+        uint256[] lotToken;
+        uint256[] lotShares;
+        uint256[] lotAt;
     }
 
     Config cfg;
@@ -91,6 +103,15 @@ contract Replay is Test, ERC1155Holder {
     World phoebe;
     World naive;
 
+    // Markets. Market i trades tokens 2i+1 (YES) and 2i+2 (NO), so a single-market file uses tokens 1 and 2.
+    uint256 constant NONE = 9_999_999; // "no price at this tick" sentinel in multi-market files
+    uint256 n;
+    uint256[] resolutionOf;
+    uint256[] dvOf; // daily volume, USDC 6dp
+    uint256[] lastIdx; // index of each market's final (resolution) tick
+    bool[] settledOf; // past its resolution tick: shares redeem at 0/1, no order book needed
+    bool[] liveOf; // has had at least one price
+    uint256 curIdx;
     uint256 nextOpen;
     uint256 nextLog;
     bool yesSide;
@@ -126,7 +147,12 @@ contract Replay is Test, ERC1155Holder {
             liqFeeBps: vm.envOr("LIQ_FEE", uint256(0)),
             baseRate: vm.envOr("BASE_RATE_BPS", uint256(500)) * 1e14,
             slope1: vm.envOr("SLOPE1_BPS", uint256(1_500)) * 1e14,
-            attentiveBps: vm.envOr("ATTENTIVE", uint256(0))
+            attentiveBps: vm.envOr("ATTENTIVE", uint256(0)),
+            slipY: vm.envOr("SLIP_Y", uint256(0)),
+            capDvBps: vm.envOr("CAP_DV", uint256(0)),
+            absorb: vm.envOr("ABSORB", false),
+            invHold: vm.envOr("INV_HOLD", uint256(0)),
+            clusterCapBps: vm.envOr("CLUSTER_CAP", uint256(0))
         });
     }
 
@@ -134,18 +160,41 @@ contract Replay is Test, ERC1155Holder {
         string memory root = vm.projectRoot();
         string memory json = vm.readFile(string.concat(root, "/../sim/data/", name, ".json"));
         uint256[] memory ts = vm.parseJsonUintArray(json, ".t");
-        uint256[] memory px = vm.parseJsonUintArray(json, ".p");
-        uint256 resolution = ts[ts.length - 1] + 14 days;
-        if (vm.keyExistsJson(json, ".resolutionTime")) resolution = vm.parseJsonUint(json, ".resolutionTime");
-        // a market whose scheduled end is already past at the window start (stale endDate): treat as open-ended
-        if (resolution <= ts[0] + 1 days) resolution = ts[ts.length - 1] + 14 days;
+        bool multi = vm.keyExistsJson(json, ".n");
+        n = multi ? vm.parseJsonUint(json, ".n") : 1;
+        uint256[][] memory px = new uint256[][](n);
+        for (uint256 m; m < n; ++m) {
+            string memory sfx = multi ? vm.toString(m) : "";
+            px[m] = vm.parseJsonUintArray(json, string.concat(".p", sfx));
+            uint256 res = ts[ts.length - 1] + 14 days;
+            if (vm.keyExistsJson(json, string.concat(".resolutionTime", sfx))) {
+                res = vm.parseJsonUint(json, string.concat(".resolutionTime", sfx));
+            }
+            uint256 last;
+            uint256 first = type(uint256).max;
+            for (uint256 i; i < ts.length; ++i) {
+                if (px[m][i] != NONE) {
+                    last = i;
+                    if (first == type(uint256).max) first = i;
+                }
+            }
+            // a market whose scheduled end is already past at its window start (stale endDate): open-ended
+            if (res <= ts[first] + 1 days) res = ts[last] + 14 days;
+            resolutionOf.push(res);
+            lastIdx.push(last);
+            dvOf.push(
+                vm.keyExistsJson(json, string.concat(".dailyVolume", sfx))
+                    ? vm.parseJsonUint(json, string.concat(".dailyVolume", sfx)) * USD
+                    : 0
+            );
+            settledOf.push(false);
+            liveOf.push(false);
+        }
 
         vm.warp(ts[0]);
         _deployShared();
-        _setPx(px[0]);
-
-        _deployWorld(phoebe, "phoebe", true, uint64(resolution));
-        if (cfg.runNaive) _deployWorld(naive, "naive", false, uint64(resolution));
+        _deployWorld(phoebe, "phoebe", true);
+        if (cfg.runNaive) _deployWorld(naive, "naive", false);
 
         string memory summary = vm.envOr("SUMMARY", string(""));
         if (bytes(summary).length == 0) {
@@ -159,9 +208,11 @@ contract Replay is Test, ERC1155Holder {
         nextOpen = ts[0];
         nextLog = ts[0];
         yesSide = true;
+        uint256[] memory row = new uint256[](n);
         for (uint256 i; i < ts.length; ++i) {
+            for (uint256 m; m < n; ++m) row[m] = px[m][i];
             // external self-call: each tick gets fresh memory (one long call would hit MemoryOOG)
-            this.tick(ts[i], px[i], i + 1 == ts.length);
+            this.tick(i, ts[i], row, i + 1 == ts.length);
         }
 
         if (bytes(summary).length == 0) {
@@ -176,21 +227,31 @@ contract Replay is Test, ERC1155Holder {
         }
     }
 
-    function tick(uint256 t, uint256 p6, bool last) external {
+    function tick(uint256 idx, uint256 t, uint256[] calldata pxs, bool last) external {
         vm.warp(t);
-        _setPx(p6);
+        curIdx = idx;
+        for (uint256 m; m < n; ++m) {
+            if (pxs[m] != NONE && !settledOf[m]) {
+                _setPx(m, pxs[m]);
+                liveOf[m] = true;
+            }
+        }
 
         _sweep(phoebe);
         _closeExpired(phoebe);
+        if (cfg.absorb) _sellLots(phoebe);
         if (cfg.runNaive) {
             _sweep(naive);
             _closeExpired(naive);
         }
 
         if (t >= nextOpen && !last) {
-            uint256 side = yesSide ? YES : NO;
-            _tryOpen(phoebe, side);
-            if (cfg.runNaive) _tryOpen(naive, side);
+            for (uint256 m; m < n; ++m) {
+                if (!liveOf[m] || settledOf[m] || idx >= lastIdx[m]) continue;
+                uint256 tokenId = yesSide ? 2 * m + 1 : 2 * m + 2;
+                _tryOpen(phoebe, tokenId);
+                if (cfg.runNaive) _tryOpen(naive, tokenId);
+            }
             yesSide = !yesSide;
             nextOpen = t + cfg.openEvery;
         }
@@ -198,19 +259,32 @@ contract Replay is Test, ERC1155Holder {
         _trackPeak(phoebe);
         if (cfg.runNaive) _trackPeak(naive);
 
+        for (uint256 m; m < n; ++m) {
+            if (idx == lastIdx[m]) settledOf[m] = true;
+        }
+
         if (bytes(csvPath).length > 0 && (t >= nextLog || last)) {
-            vm.writeLine(csvPath, _row(t, p6));
+            vm.writeLine(csvPath, _row(t, pxs[0] == NONE ? 0 : pxs[0]));
             nextLog = t + 1 hours;
         }
     }
 
-    function _setPx(uint256 p6) internal {
+    function _setPx(uint256 m, uint256 p6) internal {
         if (p6 > 1e6) p6 = 1e6; // history occasionally prints 1.005
         uint256 p = p6 * 1e12;
-        oracle.setPrice(YES, p);
-        oracle.setPrice(NO, 1e18 - p);
-        market.setPrice(YES, p);
-        market.setPrice(NO, 1e18 - p);
+        oracle.setPrice(2 * m + 1, p);
+        oracle.setPrice(2 * m + 2, 1e18 - p);
+        market.setPrice(2 * m + 1, p);
+        market.setPrice(2 * m + 2, 1e18 - p);
+    }
+
+    /// Market index of a token, and whether it is at/after its resolution tick.
+    function _mkt(uint256 tokenId) internal pure returns (uint256) {
+        return (tokenId - 1) / 2;
+    }
+
+    function _resolving(uint256 m) internal view returns (bool) {
+        return settledOf[m] || curIdx >= lastIdx[m];
     }
 
     // ------------------------------------------------------------------ setup
@@ -227,7 +301,7 @@ contract Replay is Test, ERC1155Holder {
         usdc.mint(address(this), 1_000_000_000 * USD);
     }
 
-    function _deployWorld(World storage w, string memory name, bool smart, uint64 resolution) internal {
+    function _deployWorld(World storage w, string memory name, bool smart) internal {
         w.name = name;
         w.pool = new LendingPool(usdc);
         w.senior = new TrancheVault(w.pool, 0, "sr", "sr");
@@ -235,34 +309,41 @@ contract Replay is Test, ERC1155Holder {
         w.pool.setVaults(address(w.senior), address(w.junior));
         w.risk = new RiskEngine();
 
-        RiskEngine.Market memory m = RiskEngine.Market({
-            listed: true,
-            openEnabled: true,
-            liqLtvBps: cfg.liqLtv,
-            openBufferBps: cfg.openBuffer,
-            resolutionTime: resolution,
-            cutoffDuration: cfg.cutoffHours * 1 hours,
-            rampDuration: cfg.rampDays * 1 days,
-            borrowCap: uint128(LP_TOTAL)
-        });
         if (!smart || !cfg.bands) {
             w.risk.setBands(RiskEngine.PriceBands({floor: 0, safeLow: 1, safeHigh: 1e18 - 1, ceil: 1e18}));
         }
-        if (!smart) {
-            m.cutoffDuration = 0;
-            m.rampDuration = 0;
-            m.resolutionTime = type(uint64).max;
-        } else {
+        if (smart) {
             if (cfg.volK > 0) w.risk.setVolParams(IVolatilityOracle(address(oracle)), cfg.volHorizon, cfg.volK);
             w.risk.setJumpAllowance(cfg.jumpWad);
         }
-        w.risk.listMarket(YES, m);
-        w.risk.listMarket(NO, m);
+        uint256[] memory all = new uint256[](2 * n);
+        for (uint256 i; i < n; ++i) {
+            RiskEngine.Market memory m = RiskEngine.Market({
+                listed: true,
+                openEnabled: true,
+                liqLtvBps: cfg.liqLtv,
+                openBufferBps: cfg.openBuffer,
+                resolutionTime: smart ? uint64(resolutionOf[i]) : type(uint64).max,
+                cutoffDuration: smart ? cfg.cutoffHours * 1 hours : 0,
+                rampDuration: smart ? cfg.rampDays * 1 days : 0,
+                borrowCap: uint128(
+                    cfg.capDvBps > 0 && dvOf[i] > 0 ? Math.min(LP_TOTAL, dvOf[i] * cfg.capDvBps / 10_000) : LP_TOTAL
+                )
+            });
+            w.risk.listMarket(2 * i + 1, m);
+            w.risk.listMarket(2 * i + 2, m);
+            (all[2 * i], all[2 * i + 1]) = (2 * i + 1, 2 * i + 2);
+        }
+        if (smart && cfg.clusterCapBps > 0) {
+            w.risk.setCluster(all, 1);
+            w.risk.setClusterCap(1, LP_TOTAL * cfg.clusterCapBps / 10_000);
+        }
 
         w.pm = new PositionManager(usdc, IERC1155(address(ctf)), w.pool, w.risk, oracle, venue);
         w.pm.setParams(smart ? cfg.bonusBps : 500, 1 days);
         if (smart) {
             w.pm.setFees(cfg.openFeeBps, cfg.liqFeeBps);
+            w.pm.setAbsorbUnderwater(cfg.absorb);
             w.pool.setRateParams(cfg.baseRate, cfg.slope1, 0.8e18, 1.5e18);
         }
         w.pool.setManager(address(w.pm));
@@ -328,32 +409,76 @@ contract Replay is Test, ERC1155Holder {
     function _sweep(World storage w) internal {
         for (uint256 k = w.open.length; k > 0; --k) {
             uint256 j = k - 1;
-            uint256 id = w.open[j];
-            PositionManager.Health memory h = w.pm.health(id);
-            if (!h.liquidatable) continue;
-            // A rational liquidator only acts if the seized shares are worth what it pays at the *market* price.
-            (, uint256 tokenId,,) = w.pm.positions(id);
-            (uint256 mkt,) = market.getPrice(tokenId);
-            uint256 snap = vm.snapshotState();
-            (uint256 paid, uint256 seized) = w.pm.liquidate(id, type(uint256).max);
-            uint256 seizedValue = seized * mkt / 1e18;
-            if (seizedValue < paid) {
-                vm.revertToState(snap);
-                w.unprofitableLiqs++;
-                continue;
-            }
-            vm.deleteStateSnapshot(snap);
-            w.liquidations++;
-            if (seizedValue > paid) w.traderPenalty += seizedValue - paid;
-            if (paid >= h.debt) w.solventLiqs++;
-            if (paid < h.debt) {
-                uint256 bd = h.debt - paid;
-                w.badDebtEvents++;
-                w.badDebt += bd;
-                if (bd > w.maxSingleBadDebt) w.maxSingleBadDebt = bd;
-            }
-            _remove(w, j);
+            PositionManager.Health memory h = w.pm.health(w.open[j]);
+            if (h.liquidatable && _liquidateOne(w, w.open[j], h)) _remove(w, j);
         }
+    }
+
+    /// @return done Position is gone (liquidated or absorbed).
+    function _liquidateOne(World storage w, uint256 id, PositionManager.Health memory h) internal returns (bool) {
+        (, uint256 tokenId,,) = w.pm.positions(id);
+        uint256 snap = vm.snapshotState();
+        uint256 paid;
+        uint256 seized;
+        try w.pm.liquidate(id, type(uint256).max) returns (uint256 _paid, uint256 _seized) {
+            (paid, seized) = (_paid, _seized);
+        } catch {
+            // absorb mode: underwater -> backstop inventory (a protocol action, no liquidator economics)
+            vm.revertToStateAndDelete(snap);
+            (,, uint256 shares,) = w.pm.positions(id);
+            w.pm.absorb(id);
+            w.lotToken.push(tokenId);
+            w.lotShares.push(shares);
+            w.lotAt.push(block.timestamp);
+            w.absorbed++;
+            w.absorbedDebt += h.debt;
+            return true;
+        }
+        // A rational liquidator only acts if the seized shares, sold at the *market* price after impact, cover what it pays.
+        (uint256 mkt,) = market.getPrice(tokenId);
+        uint256 seizedValue = seized * mkt / 1e18;
+        if (seizedValue - seizedValue * _slipBps(tokenId, seizedValue) / 10_000 < paid) {
+            vm.revertToStateAndDelete(snap);
+            w.unprofitableLiqs++;
+            return false;
+        }
+        vm.deleteStateSnapshot(snap);
+        w.liquidations++;
+        if (seizedValue > paid) w.traderPenalty += seizedValue - paid;
+        if (paid >= h.debt) w.solventLiqs++;
+        if (paid < h.debt) {
+            uint256 bd = h.debt - paid;
+            w.badDebtEvents++;
+            w.badDebt += bd;
+            if (bd > w.maxSingleBadDebt) w.maxSingleBadDebt = bd;
+        }
+        return true;
+    }
+
+    /// Keeper policy: sell each absorbed lot `invHold` after absorbing it (or at resolution), with price impact.
+    function _sellLots(World storage w) internal {
+        for (uint256 k = w.lotToken.length; k > 0; --k) {
+            uint256 j = k - 1;
+            bool due = _resolving(_mkt(w.lotToken[j])) || (cfg.invHold > 0 && block.timestamp >= w.lotAt[j] + cfg.invHold);
+            if (!due) continue;
+            (uint256 mkt,) = market.getPrice(w.lotToken[j]);
+            venue.setSellHaircut(_slipBps(w.lotToken[j], w.lotShares[j] * mkt / 1e18));
+            w.recovered += w.pm.sellInventory(w.lotToken[j], w.lotShares[j], 0);
+            venue.setSellHaircut(0);
+            uint256 l = w.lotToken.length - 1;
+            (w.lotToken[j], w.lotShares[j], w.lotAt[j]) = (w.lotToken[l], w.lotShares[l], w.lotAt[l]);
+            w.lotToken.pop();
+            w.lotShares.pop();
+            w.lotAt.pop();
+        }
+    }
+
+    /// Square-root impact: selling X into a market trading V/day costs Y * sqrt(X / V). Capped at 90%.
+    function _slipBps(uint256 tokenId, uint256 x) internal view returns (uint256) {
+        uint256 m = _mkt(tokenId);
+        if (cfg.slipY == 0 || dvOf[m] == 0 || _resolving(m)) return 0;
+        uint256 s = cfg.slipY * Math.sqrt(x * 1e18 / dvOf[m]) / 1e9;
+        return s > 9_000 ? 9_000 : s;
     }
 
     function _trackPeak(World storage w) internal {
@@ -372,27 +497,47 @@ contract Replay is Test, ERC1155Holder {
     // ------------------------------------------------------------------ output
 
     function _json(World storage w) internal view returns (string memory) {
-        string memory a = string.concat(
-            '{"opened":', vm.toString(w.opened),
-            ',"closed":', vm.toString(w.closed),
-            ',"liquidations":', vm.toString(w.liquidations),
-            ',"badDebtEvents":', vm.toString(w.badDebtEvents),
-            ',"badDebt":', vm.toString(w.badDebt),
-            ',"maxSingleBadDebt":', vm.toString(w.maxSingleBadDebt)
-        );
+        return string.concat(_json1(w), _json2(w), _json3(w), "}");
+    }
+
+    function _kv(string memory k, uint256 v) internal pure returns (string memory) {
+        return string.concat(',"', k, '":', vm.toString(v));
+    }
+
+    function _json1(World storage w) internal view returns (string memory) {
         return string.concat(
-            a,
-            ',"skipped":', vm.toString(w.skipped),
-            ',"volume":', vm.toString(w.volume),
-            ',"peakDebt":', vm.toString(w.peakDebt),
-            ',"senior":', vm.toString(w.pool.trancheAssets(0)),
-            ',"junior":', vm.toString(w.pool.trancheAssets(1)),
-            ',"stillOpen":', vm.toString(w.open.length),
-            ',"solventLiqs":', vm.toString(w.solventLiqs),
-            ',"traderPenalty":', vm.toString(w.traderPenalty),
-            ',"openFees":', vm.toString(w.openFees),
-            ',"unprofitableLiqs":', vm.toString(w.unprofitableLiqs),
-            ',"defensiveCloses":', vm.toString(w.defensiveCloses), "}"
+            '{"opened":', vm.toString(w.opened),
+            _kv("closed", w.closed),
+            _kv("liquidations", w.liquidations),
+            _kv("badDebtEvents", w.badDebtEvents),
+            _kv("badDebt", w.badDebt),
+            _kv("maxSingleBadDebt", w.maxSingleBadDebt)
+        );
+    }
+
+    function _json2(World storage w) internal view returns (string memory) {
+        return string.concat(
+            _kv("skipped", w.skipped),
+            _kv("volume", w.volume),
+            _kv("peakDebt", w.peakDebt),
+            _kv("senior", w.pool.trancheAssets(0)),
+            _kv("junior", w.pool.trancheAssets(1)),
+            _kv("stillOpen", w.open.length)
+        );
+    }
+
+    function _json3(World storage w) internal view returns (string memory) {
+        return string.concat(
+            string.concat(
+                _kv("solventLiqs", w.solventLiqs),
+                _kv("traderPenalty", w.traderPenalty),
+                _kv("openFees", w.openFees),
+                _kv("unprofitableLiqs", w.unprofitableLiqs)
+            ),
+            _kv("defensiveCloses", w.defensiveCloses),
+            _kv("absorbed", w.absorbed),
+            _kv("absorbedDebt", w.absorbedDebt),
+            _kv("recovered", w.recovered)
         );
     }
 

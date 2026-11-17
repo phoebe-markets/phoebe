@@ -21,7 +21,7 @@ def world_stats(rows, key):
     pnl = [(m, usd(w["senior"] + w["junior"]) - LP) for m, w in ws]
     bad = sum(usd(w["badDebt"]) for _, w in ws)
     interest = sum(p for _, p in pnl) + bad
-    return {
+    out = {
         "markets": len(ws),
         "lp_pnl": sum(p for _, p in pnl),
         "interest": interest,
@@ -39,12 +39,18 @@ def world_stats(rows, key):
         "solvent_liqs": sum(w.get("solventLiqs", 0) for _, w in ws),
         "trader_penalty": sum(usd(w.get("traderPenalty", 0)) for _, w in ws),
         "open_fees": sum(usd(w.get("openFees", 0)) for _, w in ws),
+        "absorbed_debt": sum(usd(w.get("absorbedDebt", 0)) for _, w in ws),
+        "recovered": sum(usd(w.get("recovered", 0)) for _, w in ws),
+        "absorbed": sum(w.get("absorbed", 0) for _, w in ws),
     }
+    # credit loss = fire-sale bad debt + absorbed debt not recovered (negative = net recovery gain)
+    out["credit_loss"] = out["bad_debt"] + out["absorbed_debt"] - out["recovered"]
+    return out
 
 
 def fmt(s):
     return (
-        f"LP PnL {s['lp_pnl']:>+11,.0f} | interest {s['interest']:>9,.0f} | bad debt {s['bad_debt']:>9,.0f} "
+        f"LP PnL {s['lp_pnl']:>+11,.0f} | income {s['lp_pnl'] + s['credit_loss']:>9,.0f} | credit loss {s['credit_loss']:>9,.0f} "
         f"({s['bad_events']} events) | losing mkts {s['loss_markets']:>2}/{s['markets']} | "
         f"worst {s['worst'][1]:>+9,.0f} ({s['worst'][0][:38]}) | volume {s['volume']/1e6:6.1f}M | "
         f"util {s['avg_peak_util']:.0%}\n            traders: opened {s['opened']}, liquidated {s['liqs']/max(1,s['opened']):.0%} "
@@ -61,6 +67,9 @@ for tag in tags:
     p = world_stats(rows, "phoebe")
     print(f"[{tag}] {' '.join(cfg) or '(defaults)'}")
     print("   phoebe: " + fmt(p))
+    if p["absorbed"]:
+        print(f"           absorbed {p['absorbed']} positions: debt written off {p['absorbed_debt']:,.0f}, "
+              f"recovered {p['recovered']:,.0f} (net {p['recovered']-p['absorbed_debt']:+,.0f})")
     if p["junior_min"] < 200_000:
         print(f"           junior min {p['junior_min']:,.0f}  (senior impaired in {p['senior_loss_markets']} mkts)")
     n = world_stats(rows, "naive")

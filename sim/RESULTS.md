@@ -21,6 +21,47 @@ bot sweeps every tick and only liquidates when it's profitable at the *market* p
 | Jump allowance | cushion ≥ an extra 0.10 absolute move | jumps out of calm markets (Lighter launch) |
 | Liquidation split | 3% bonus to the liquidator + 2% fee to junior (same 5% total cost to traders) | funds the insurance buffer from the liquidation flow |
 | Opening fee | 0.3% of borrowed, to junior | charges for the jump risk that remains |
+| **Absorb + 6h cool-off** | underwater positions aren't fire-sold: debt is written off against junior, the shares go to backstop inventory, and a keeper sells them 6h later (or at resolution) | fire-sales into crashed books; one-tick spikes |
+| Cluster caps | available, but set loosely (≥25% of the pool per cluster) | correlated markets in a shared pool. The backtest shows they cost volume without reducing tail losses (see below) |
+
+## Round 2: liquidity, absorb, correlated markets
+
+The liquidators now face square-root price impact when selling seized shares: `slip = Y·√(sold / daily volume)`,
+using each market's lifetime average daily volume. Y = 0.3 (about 5% to sell $15k into $500k/day) is the
+working assumption. Absorbed inventory pays the same impact when the keeper sells it.
+
+**Absorb vs fire-sale** (full strategy, attentive traders, Y = 0.3):
+
+| Underwater policy | Train LP PnL | Train worst mkt | Holdout LP PnL | Holdout worst mkt |
+|---|---|---|---|---|
+| Fire-sell to liquidators | +197k | −25k | +203k | −3.5k |
+| Absorb, hold to resolution | +216k | **−135k** | +295k | −5.5k |
+| Absorb, 1h cool-off | +368k | −10k | +218k | −3.8k |
+| **Absorb, 6h cool-off** | **+392k** | **−3.5k** | **+218k** | −4.0k |
+| Absorb, 24h cool-off | +387k | −6.0k | +214k | −4.6k |
+
+- Holding to resolution makes the LPs bet on the outcome. That's the same expected value but a much fatter
+  tail: one shutdown market took 67% of its junior tranche.
+- A cool-off keeps most of the benefit without that bet. On the train set, a large share of the gain
+  (+151k net recovery) comes from prices rebounding after crashes. On the holdout the recovery is only
+  +2.6k, roughly what the martingale argument predicts. **The robust claim is "never worse, sometimes
+  much better", not "+150k".**
+
+**Liquidator slippage barely matters for the full strategy** (Y = 0 / 0.1 / 0.3 / 1.0 → train LP PnL
++243k / +243k / +197k / +192k). With heavy slippage, liquidators simply wait, and in markets that
+recover that avoids crystallizing losses.
+
+**Correlated markets in one shared pool:** 25 clusters (markets of the same event across both sets, plus a
+21-market Iran theme), each replayed in one shared $1M pool, with every market trading at the same time.
+
+| Cluster cap | LP PnL (25 pools) | Worst cluster | Junior min | Volume | Peak util |
+|---|---|---|---|---|---|
+| none | +389k | −2.5k | 197k | 193M | 32% |
+| 25% of pool | +314k | −2.5k | 197k | 161M | 21% |
+| 10% of pool | +197k | −2.7k | 197k | 105M | 10% |
+
+With this risk engine, correlation isn't the binding risk in the data: per-market rules already keep each
+jump small, and the junior-coverage gate limits total debt. Cluster caps are kept as a loose safety valve.
 
 ## Results: LP PnL summed over 60 × $1M pools, ~45 days each
 
@@ -67,9 +108,12 @@ the worst single market is −$3.5k (1.75% of that pool's junior tranche), and s
 ```sh
 bun sim/fetch-batch.ts 60 45 1000                 # train set -> sim/data/batch
 bun sim/fetch-batch.ts 60 45 2000 holdout 60      # holdout   -> sim/data/holdout
-DATASET=holdout sim/backtest.sh h_att_full NAIVE=false ATTENTIVE=9000 \
-  BONUS=300 LIQ_FEE=200 JUMP_BPS=1000 OPEN_FEE=30
-python3 sim/analyze.py h_att_full --markets
+python3 sim/make-clusters.py                       # shared-pool clusters -> sim/data/clusters
+
+FULL="NAIVE=false ATTENTIVE=9000 BONUS=300 LIQ_FEE=200 JUMP_BPS=1000 OPEN_FEE=30 SLIP_Y=3000 ABSORB=true INV_HOLD=21600"
+DATASET=holdout  sim/backtest.sh h_full  $FULL
+DATASET=clusters sim/backtest.sh cl_full $FULL     # ~3 min; the 21-market Iran cluster dominates
+python3 sim/analyze.py h_full cl_full --markets
 ```
 
 Single market with a timeline CSV: `REPLAY=batch/<slug> forge test --mc Replay -vv` (from `contracts/`).

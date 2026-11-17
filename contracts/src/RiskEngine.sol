@@ -44,6 +44,10 @@ contract RiskEngine is Ownable {
     }
 
     mapping(uint256 => Market) public markets;
+    /// @notice Correlated markets (e.g. all outcomes of one event, or one geopolitical theme) share a cluster and a
+    ///         cluster-wide borrow cap, so one news event can't hit more than a bounded slice of the pool.
+    mapping(uint256 => uint32) public clusterOf; // tokenId => cluster (0 = none)
+    mapping(uint32 => uint256) public clusterCap; // USDC
     PriceBands public bands;
     mapping(address => bool) public guardians;
 
@@ -60,6 +64,8 @@ contract RiskEngine is Ownable {
     event BandsSet(PriceBands bands);
     event VolParamsSet(address oracle, uint32 horizon, uint32 kBps);
     event JumpAllowanceSet(uint64 jumpWad);
+    event ClusterSet(uint256 indexed tokenId, uint32 indexed cluster);
+    event ClusterCapSet(uint32 indexed cluster, uint256 cap);
 
     error BadConfig();
     error NotGuardian();
@@ -93,6 +99,18 @@ contract RiskEngine is Ownable {
         if (horizon == 0) revert BadConfig();
         (volOracle, volHorizon, volKBps) = (oracle, horizon, kBps);
         emit VolParamsSet(address(oracle), horizon, kBps);
+    }
+
+    function setCluster(uint256[] calldata tokenIds, uint32 cluster) external onlyOwner {
+        for (uint256 i; i < tokenIds.length; ++i) {
+            clusterOf[tokenIds[i]] = cluster;
+            emit ClusterSet(tokenIds[i], cluster);
+        }
+    }
+
+    function setClusterCap(uint32 cluster, uint256 cap) external onlyOwner {
+        clusterCap[cluster] = cap;
+        emit ClusterCapSet(cluster, cap);
     }
 
     function setJumpAllowance(uint64 _jumpWad) external onlyOwner {

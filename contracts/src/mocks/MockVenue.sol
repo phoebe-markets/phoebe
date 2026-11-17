@@ -15,6 +15,8 @@ contract MockVenue is IExecutionVenue {
     MockCTF public immutable ctf;
     IPriceOracle public immutable oracle;
     uint256 public immutable spreadBps;
+    /// @notice Extra haircut on sells, settable by anyone (mock only), used by the replay to model price impact.
+    uint256 public sellHaircutBps;
 
     constructor(IERC20 _usdc, MockCTF _ctf, IPriceOracle _oracle, uint256 _spreadBps) {
         usdc = _usdc;
@@ -34,9 +36,14 @@ contract MockVenue is IExecutionVenue {
         ctf.mint(msg.sender, tokenId, sharesOut);
     }
 
+    function setSellHaircut(uint256 bps) external {
+        require(bps <= 10_000, "bps");
+        sellHaircutBps = bps;
+    }
+
     function sell(uint256 tokenId, uint256 shares, uint256 minUsdcOut) external returns (uint256 usdcOut) {
         (uint256 price,) = oracle.getPrice(tokenId);
-        uint256 bid = price * (10_000 - spreadBps) / 10_000;
+        uint256 bid = price * (10_000 - spreadBps) / 10_000 * (10_000 - sellHaircutBps) / 10_000;
         usdcOut = shares * bid / 1e18;
         require(usdcOut >= minUsdcOut, "slippage");
         ctf.burn(msg.sender, tokenId, shares);
