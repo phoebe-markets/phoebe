@@ -1,7 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useAccount, useConnect, useDisconnect, useSwitchChain } from "wagmi";
 import { getWalletClient } from "@wagmi/core";
-import { polygonAmoy } from "viem/chains";
 import { wagmiConfig } from "./wagmi";
 import { NON_EVM_HINT, traceProvider } from "./walletTrace";
 import {
@@ -17,8 +16,10 @@ import {
   type Net,
   type Wallet,
 } from "./chain";
-import { useProtocol } from "./store";
-import { addMargin, closePosition, deposit, explain, mintTestUsdc, openPosition, withdraw } from "./actions";
+import { useProtocol, type PositionView } from "./store";
+import { addMargin, closePosition, deposit, explain, mintTestUsdc, openPosition, settlePosition, withdraw, wrapPusd } from "./actions";
+import { StatusBanner } from "./components/StatusBanner";
+import { PusdPanel } from "./components/PusdPanel";
 import { MarketBar, MarketPanel } from "./components/MarketPanel";
 import { TradePanel } from "./components/TradePanel";
 import { Positions } from "./components/Positions";
@@ -54,6 +55,9 @@ function useTheme(): [Theme, (t: Theme) => void] {
  * Local: pick an Anvil demo account. Testnet: a browser wallet via wagmi. `getWallet()` returns a wallet client that
  * is guaranteed to be on the right chain (switching / adding Amoy first if needed), or throws.
  */
+/** Browser wallets only exist on the wagmi chains (Amoy, Polygon); the local replay uses demo accounts. */
+const WALLET_CHAIN = CFG.chain.id as (typeof wagmiConfig)["chains"][number]["id"];
+
 function useWallet() {
   const [demoIdx, setDemoIdx] = useState(0);
   const demo = useMemo(() => (CFG.wallet === "demo" ? demoWallet(DEMO_ACCOUNTS[demoIdx].pk) : null), [demoIdx]);
@@ -76,8 +80,8 @@ function useWallet() {
       const c = connectors.find((x) => x.id === connectorId);
       if (!c) return;
       try {
-        // ask for Amoy at connect time, so the wallet grants this site the chain as well as the account
-        await connectAsync({ connector: c, chainId: polygonAmoy.id });
+        // ask for the network at connect time, so the wallet grants this site the chain as well as the account
+        await connectAsync({ connector: c, chainId: WALLET_CHAIN });
       } catch (e) {
         setWalletErr(explain(e));
       }
@@ -88,8 +92,8 @@ function useWallet() {
   const getWallet = useCallback(async (): Promise<Wallet> => {
     if (demo) return demo;
     if (!isConnected) throw new Error("Connect a wallet first");
-    if (chainId !== polygonAmoy.id) await switchChainAsync({ chainId: polygonAmoy.id });
-    return (await getWalletClient(wagmiConfig, { chainId: polygonAmoy.id })) as unknown as Wallet;
+    if (chainId !== WALLET_CHAIN) await switchChainAsync({ chainId: WALLET_CHAIN });
+    return (await getWalletClient(wagmiConfig, { chainId: WALLET_CHAIN })) as unknown as Wallet;
   }, [demo, isConnected, chainId, switchChainAsync]);
 
   // EIP-6963 discovery lists every installed wallet; fall back to the generic injected connector
@@ -101,7 +105,7 @@ function useWallet() {
   return {
     address: demo ? demo.account.address : isConnected ? (address ?? null) : null,
     walletName: demo ? "demo account" : connector?.name,
-    wrongChain: !demo && isConnected && chainId !== polygonAmoy.id,
+    wrongChain: !demo && isConnected && chainId !== CFG.chain.id,
     getWallet,
     demoIdx,
     setDemoIdx,
@@ -260,6 +264,10 @@ export function App() {
     );
   };
 
+  const pusdCard = CFG.mainnet && address ? (
+    <PusdPanel snap={snap} address={address} onWrap={act((w: Wallet, amount: number) => wrapPusd(w, amount))} />
+  ) : null;
+
   const wallet =
     CFG.wallet === "demo" ? (
       <Menu className="wallet-btn" label={<><span className="dot" aria-hidden />{DEMO_ACCOUNTS[w.demoIdx].label}<Chevron /></>}>
@@ -280,8 +288,8 @@ export function App() {
         {(close) => (
           <>
             <div className="menu-note">Connected via {w.walletName}</div>
-            <div className="menu-note mono">{usd(snap.account.usdc)} USDC</div>
-            <button role="menuitem" onClick={() => { close(); faucet(); }}>Get 10k test USDC</button>
+            <div className="menu-note mono">{usd(snap.account.usdc)} {CFG.asset}</div>
+            {CFG.faucet && <button role="menuitem" onClick={() => { close(); faucet(); }}>Get 10k test USDC</button>}
             {CFG.explorer && (
               <a role="menuitem" href={`${CFG.explorer}/address/${address}`} target="_blank" rel="noreferrer" onClick={close}>View on explorer ↗</a>
             )}
@@ -297,7 +305,7 @@ export function App() {
           w.wallets.map((c) => (
             <button key={c.uid} role="menuitem" disabled={w.connecting} onClick={() => { close(); w.connect(c.id); }}>
               {c.name === "Injected" ? "Browser wallet" : c.name}
-              {NON_EVM_HINT.test(c.name) && <small> may not support Amoy</small>}
+              {NON_EVM_HINT.test(c.name) && <small> may not support Polygon</small>}
             </button>
           ))
         }
@@ -335,8 +343,9 @@ export function App() {
       <main className="app">
         {error && <div className="banner">Chain read failed, showing the last good state: {error}</div>}
         {w.walletErr && <div className="banner">{w.walletErr}</div>}
-        {w.wrongChain && <div className="banner">Your wallet is on another network; Phoebe will ask it to switch to Polygon Amoy when you transact.</div>}
+        {w.wrongChain && <div className="banner">Your wallet is on another network; Phoebe will ask it to switch to {CFG.chain.name} when you transact.</div>}
         {faucetMsg && <div className="banner">{faucetMsg}</div>}
+        <StatusBanner snap={snap} />
 
         {tab === "trade" ? (
           <>
@@ -348,7 +357,10 @@ export function App() {
             </div>
             <Positions key={`pos-${address}`} snap={snap}
               onClose={act((w: Wallet, id: bigint) => closePosition(w, d, abi, id))}
-              onAddMargin={act((w: Wallet, id: bigint, amount: number) => addMargin(w, d, abi, id, amount))} />
+              onAddMargin={act((w: Wallet, id: bigint, amount: number) => addMargin(w, d, abi, id, amount))}
+              onSettle={d.conditionIds ? act((w: Wallet, p: PositionView) =>
+                settlePosition(w, d, abi, p.id, d.conditionIds![p.market], snap.status.redeemed[p.market])) : undefined} />
+            {pusdCard}
             <ActivityFeed items={snap.activity} />
           </>
         ) : (
@@ -359,12 +371,15 @@ export function App() {
                 onDeposit={act((w: Wallet, t: "senior" | "junior", amount: number) => deposit(w, d, abi, t, amount))}
                 onWithdraw={act((w: Wallet, t: "senior" | "junior", amount: number) => withdraw(w, d, abi, t, amount))} />
             </div>
+            {pusdCard}
             <ActivityFeed items={snap.activity} />
           </>
         )}
 
         <footer className="app-foot">
-          {NET === "amoy"
+          {NET === "polygon"
+            ? `Live on Polygon: positions are backed by real Polymarket outcome tokens. Prices come from Polymarket via the keeper; fills come from the market maker's inventory at oracle ±${(snap.status.venueSpread * 100).toFixed(1)}%, hedged on Polymarket. Unaudited; small caps.`
+            : NET === "amoy"
             ? "Live on Polygon Amoy: prices stream from Polymarket via the keeper; fills come from the keeper's inventory at oracle ±0.5%. Testnet funds only. Need gas? Get Amoy POL from a faucet."
             : "Local replay: a historical Polymarket market replayed on an Anvil chain, on historical time."}
         </footer>

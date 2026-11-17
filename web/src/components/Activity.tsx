@@ -9,6 +9,8 @@ const ICON: Record<A["kind"], [string, string]> = {
   Liquidated: ["✕", "var(--critical)"],
   Absorbed: ["◆", "var(--serious)"],
   InventorySold: ["$", "var(--good)"],
+  Settled: ["=", "var(--ink-2)"],
+  Redeemed: ["✓", "var(--good)"],
 };
 
 export function ActivityFeed({ items }: { items: A[] }) {

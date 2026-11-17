@@ -11,7 +11,7 @@ import {
   type WalletClient,
 } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
-import { foundry, polygonAmoy } from "viem/chains";
+import { foundry, polygon, polygonAmoy } from "viem/chains";
 
 export type Deployment = {
   chainId: number;
@@ -42,7 +42,7 @@ export type Abis = Record<"pm" | "risk" | "oracle" | "pool" | "vault" | "usdc", 
 
 // ---------------------------------------------------------------- networks
 
-export type Net = "local" | "amoy";
+export type Net = "local" | "amoy" | "polygon";
 
 type NetConfig = {
   label: string;
@@ -52,8 +52,14 @@ type NetConfig = {
   logChunk: bigint; // eth_getLogs block range per call
   wallet: "demo" | "injected";
   explorer?: string;
-  /** Some chains enforce a minimum priority fee that wallets don't know about (Amoy: 25 gwei). */
+  /** Some chains enforce a minimum priority fee that wallets don't know about (Polygon PoS + Amoy: 25 gwei). */
   minTipGwei?: number;
+  /** The pool asset's display name. */
+  asset: string;
+  /** Testnet: the pool asset is a mock anyone can mint. */
+  faucet: boolean;
+  /** Real money: show the risk notice and the pUSD on-ramp. */
+  mainnet: boolean;
 };
 
 export const NETWORKS: Record<Net, NetConfig> = {
@@ -64,6 +70,9 @@ export const NETWORKS: Record<Net, NetConfig> = {
     pollMs: 1000,
     logChunk: 1_000_000n,
     wallet: "demo",
+    asset: "USDC",
+    faucet: false,
+    mainnet: false,
   },
   amoy: {
     label: "Polygon Amoy testnet",
@@ -74,14 +83,35 @@ export const NETWORKS: Record<Net, NetConfig> = {
     wallet: "injected",
     explorer: "https://amoy.polygonscan.com",
     minTipGwei: 30, // node minimum is 25; wallets default to ~1.5 and get rejected
+    asset: "USDC",
+    faucet: true,
+    mainnet: false,
+  },
+  polygon: {
+    label: "Polygon (real money)",
+    chain: polygon,
+    rpc: (import.meta.env.VITE_POLYGON_RPC as string | undefined) ?? "https://polygon-bor-rpc.publicnode.com",
+    pollMs: 6000,
+    logChunk: 5_000n,
+    wallet: "injected",
+    explorer: "https://polygonscan.com",
+    minTipGwei: 30,
+    asset: "pUSD",
+    faucet: false,
+    mainnet: true,
   },
 };
 
-/** ?net=amoy|local; defaults to amoy anywhere but localhost. Switching networks reloads the page. */
+/**
+ * ?net=local|amoy|polygon. Default: local on localhost, else VITE_DEFAULT_NET (amoy unless the build says otherwise).
+ * Switching networks reloads the page.
+ */
 export const NET: Net = (() => {
   const q = new URLSearchParams(location.search).get("net");
-  if (q === "local" || q === "amoy") return q;
-  return ["localhost", "127.0.0.1"].includes(location.hostname) ? "local" : "amoy";
+  if (q === "local" || q === "amoy" || q === "polygon") return q;
+  if (["localhost", "127.0.0.1"].includes(location.hostname)) return "local";
+  const dflt = import.meta.env.VITE_DEFAULT_NET as string | undefined;
+  return dflt === "polygon" || dflt === "local" ? dflt : "amoy";
 })();
 export const CFG = NETWORKS[NET];
 

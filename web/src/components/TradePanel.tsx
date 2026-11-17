@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import type { MarketView, Snapshot } from "../store";
 import { cents, lev, pct, usd } from "../format";
+import { CFG } from "../chain";
 
 type Props = {
   m: MarketView;
@@ -10,12 +11,10 @@ type Props = {
   onOpen: (tokenId: bigint, margin: number, borrow: number) => Promise<void>;
 };
 
-const SPREAD = 0.005; // MockVenue half-spread; with a real venue this comes from the order book
-
 export function TradePanel({ m, snap, side, setSide, onOpen }: Props) {
   const s = side === "YES" ? m.yes : m.no;
   const maxLev = s.openAllowed ? 1 / (1 - s.maxLtv) : 1;
-  const [margin, setMargin] = useState(1000);
+  const [margin, setMargin] = useState(CFG.mainnet ? 10 : 1000);
   const [levX, setLevX] = useState(2);
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState<{ text: string; err?: boolean } | null>(null);
@@ -30,14 +29,15 @@ export function TradePanel({ m, snap, side, setSide, onOpen }: Props) {
   const capped = s.maxPositionBorrow > 0 && borrow > s.maxPositionBorrow;
   if (capped) borrow = s.maxPositionBorrow;
   const notional = margin + borrow;
-  const fill = s.price * (1 + SPREAD);
+  const fill = s.price * (1 + snap.status.venueSpread); // the venue fills at oracle + spread
   const shares = fill > 0 ? notional / fill : 0;
   const fee = (borrow * snap.fees.openFeeBps) / 10_000;
   const ltv = shares > 0 ? borrow / (shares * s.price) : 0;
   // liquidation price at today's limit: debt = shares * p * liqLtv (ignores the limit moving with price)
   const liqPrice = shares > 0 && s.liqLtv > 0 ? borrow / (shares * s.liqLtv) : NaN;
   const resolved = s.price <= 0 || s.price >= 1; // nothing left to buy: the outcome is decided
-  const canOpen = s.openAllowed && !resolved && margin > 0 && margin + fee <= snap.account.usdc && ltv <= s.maxLtv;
+  const halted = snap.status.pmPaused || !snap.status.venueActive;
+  const canOpen = s.openAllowed && !resolved && !halted && margin > 0 && margin + fee <= snap.account.usdc && ltv <= s.maxLtv;
 
   async function submit() {
     setBusy(true);
@@ -68,7 +68,7 @@ export function TradePanel({ m, snap, side, setSide, onOpen }: Props) {
 
       <div className="field">
         <label htmlFor="margin">
-          <span>Margin (USDC)</span>
+          <span>Margin ({CFG.asset})</span>
           <span>Balance {usd(snap.account.usdc)}</span>
         </label>
         <div className="input-max">
@@ -107,12 +107,16 @@ export function TradePanel({ m, snap, side, setSide, onOpen }: Props) {
           ? "Opening…"
           : !snap.account.address
             ? "Connect a wallet to trade"
-            : resolved
+            : resolved || snap.status.resolved[m.index]
             ? "Market resolved"
+            : snap.status.pmPaused
+            ? "New positions paused"
+            : !snap.status.venueActive
+            ? "Market maker offline, try shortly"
             : !s.openAllowed
               ? "Market closed to new positions"
               : margin + fee > snap.account.usdc
-                ? "Not enough USDC"
+                ? `Not enough ${CFG.asset}`
                 : `Open ${lev(levX)} long ${side}`}
       </button>
       {msg && <div className={`msg${msg.err ? " err" : ""}`}>{msg.text}</div>}

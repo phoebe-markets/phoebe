@@ -1,4 +1,4 @@
-import { BaseError, ContractFunctionRevertedError, maxUint256, parseGwei, type Abi, type Address } from "viem";
+import { BaseError, ContractFunctionRevertedError, maxUint256, parseAbi, parseGwei, type Abi, type Address } from "viem";
 import { CFG, pub, type Abis, type Deployment, type Wallet } from "./chain";
 import { lastWalletFailure } from "./walletTrace";
 
@@ -19,6 +19,13 @@ const REASONS: Record<string, string> = {
   ERC20InsufficientBalance: "Not enough USDC",
   ERC4626ExceededMaxWithdraw: "Withdrawal exceeds what the tranche can release now",
   ERC4626ExceededMaxRedeem: "Withdrawal exceeds what the tranche can release now",
+  ERC4626ExceededMaxDeposit: "Deposit is over this tranche's cap (or deposits are paused)",
+  DepositCap: "Deposit is over this tranche's cap (or deposits are paused)",
+  IsPaused: "New positions are paused by the guardian; closing still works",
+  MarketResolved: "This market has resolved: settle the position instead",
+  NotRedeemed: "The market's shares haven't been redeemed yet",
+  Inactive: "The market maker is offline (it pauses itself when Polymarket is unreachable); try again shortly",
+  OnlyUnpaused: "Polymarket's on-ramp has wrapping paused for this token",
 };
 
 export function explain(e: unknown): string {
@@ -90,6 +97,40 @@ export async function deposit(w: Wallet, d: Deployment, abi: Abis, tranche: "sen
   const vault = d[tranche];
   await ensureAllowance(w, d, abi, vault, toUsdc(amount));
   return write(w, vault, abi.vault, "deposit", [toUsdc(amount), w.account.address]);
+}
+
+/** Pay out a position in a resolved market (redeeming the market first if nobody has yet). */
+export async function settlePosition(w: Wallet, d: Deployment, abi: Abis, id: bigint, conditionId: `0x${string}`, redeemed: boolean) {
+  if (!redeemed) await write(w, d.positionManager, abi.pm, "redeem", [conditionId]);
+  return write(w, d.positionManager, abi.pm, "settle", [id]);
+}
+
+// Polymarket's collateral on-ramp (Polygon): USDC.e -> pUSD, 1:1
+export const USDCE: Address = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174";
+const ONRAMP: Address = "0x93070a847efEf7F70739046A929D47a521F5B8ee";
+const ONRAMP_ABI = parseAbi([
+  "function wrap(address _asset, address _to, uint256 _amount)",
+  "function paused(address asset) view returns (bool)",
+  "error OnlyUnpaused()",
+]);
+const ERC20_ABI = parseAbi([
+  "function balanceOf(address) view returns (uint256)",
+  "function allowance(address,address) view returns (uint256)",
+  "function approve(address,uint256) returns (bool)",
+]);
+
+export async function usdceBalance(who: Address) {
+  return Number(await pub.readContract({ address: USDCE, abi: ERC20_ABI, functionName: "balanceOf", args: [who] })) / USD;
+}
+
+export const onrampPaused = () => pub.readContract({ address: ONRAMP, abi: ONRAMP_ABI, functionName: "paused", args: [USDCE] });
+
+/** Wrap USDC.e into pUSD through Polymarket's on-ramp (pUSD is the pool asset on mainnet). */
+export async function wrapPusd(w: Wallet, amount: number) {
+  const amt = toUsdc(amount);
+  const a = (await pub.readContract({ address: USDCE, abi: ERC20_ABI, functionName: "allowance", args: [w.account.address, ONRAMP] })) as bigint;
+  if (a < amt) await write(w, USDCE, ERC20_ABI, "approve", [ONRAMP, amt]);
+  return write(w, ONRAMP, ONRAMP_ABI, "wrap", [USDCE, w.account.address, amt]);
 }
 
 /** Testnet faucet: the mock USDC is freely mintable. */

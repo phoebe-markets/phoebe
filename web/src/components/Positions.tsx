@@ -1,6 +1,7 @@
 import { useState } from "react";
 import type { PositionView, Snapshot } from "../store";
 import { cents, pct, usd } from "../format";
+import { CFG } from "../chain";
 
 /** Health bar: fill = current LTV, tick = liquidation LTV. Status color plus a text label, never color alone. */
 function Health({ p }: { p: PositionView }) {
@@ -25,9 +26,11 @@ type Props = {
   snap: Snapshot;
   onClose: (id: bigint) => Promise<void>;
   onAddMargin: (id: bigint, amount: number) => Promise<void>;
+  /** Resolved markets: pay the position out at the resolved value. */
+  onSettle?: (p: PositionView) => Promise<void>;
 };
 
-export function Positions({ snap, onClose, onAddMargin }: Props) {
+export function Positions({ snap, onClose, onAddMargin, onSettle }: Props) {
   const [busy, setBusy] = useState<string | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const ps = snap.account.positions;
@@ -82,13 +85,20 @@ export function Positions({ snap, onClose, onAddMargin }: Props) {
                   <td><Health p={p} /></td>
                   <td>{p.flaggedSince ? <span className="badge warning">▲ bonus {p.bonusBps / 100}%</span> : <span className="sub">—</span>}</td>
                   <td style={{ display: "flex", gap: 6 }}>
+                    {p.resolved ? (
+                      <button className="btn" disabled={busy !== null || !onSettle} onClick={() => run(`s${p.id}`, () => onSettle!(p))}
+                        title="The market resolved: repay the debt from the payout and send you the rest">
+                        {busy === `s${p.id}` ? "…" : "Settle"}
+                      </button>
+                    ) : (<>
                     <button className="btn ghost" disabled={busy !== null} onClick={() => run(`m${p.id}`, () => onAddMargin(p.id, Math.round(p.debt * 0.25)))}
-                      title="Repay 25% of the debt with fresh USDC">
+                      title={`Repay 25% of the debt with fresh ${CFG.asset}`}>
                       {busy === `m${p.id}` ? "…" : "Deleverage 25%"}
                     </button>
                     <button className="btn ghost" disabled={busy !== null} onClick={() => run(`c${p.id}`, () => onClose(p.id))}>
                       {busy === `c${p.id}` ? "…" : "Close"}
                     </button>
+                    </>)}
                   </td>
                 </tr>
               ))}

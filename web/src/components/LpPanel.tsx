@@ -65,7 +65,7 @@ export function PoolOverview({ snap, d }: { snap: Snapshot; d: Deployment }) {
             </>
           )}
           . APRs are interest only, from the pool's utilization-based rate; junior also receives opening and liquidation fees.
-          {CFG.wallet === "injected" && " On testnet the tranches were seeded by the deployer with mock USDC."}
+          {CFG.faucet && " On testnet the tranches were seeded by the deployer with mock USDC."}
         </div>
       </section>
 
@@ -114,12 +114,13 @@ export function LpForm({ snap, onDeposit, onWithdraw }: FormProps) {
   const p = snap.pool;
   const [tranche, setTranche] = useState<Tranche>("junior");
   const [mode, setMode] = useState<"deposit" | "withdraw">("deposit");
-  const [amount, setAmount] = useState(10_000);
+  const [amount, setAmount] = useState(CFG.mainnet ? 10 : 10_000);
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState<{ text: string; err?: boolean } | null>(null);
   const mine = tranche === "senior" ? snap.account.seniorAssets : snap.account.juniorAssets;
   const maxOut = Math.min(mine, tranche === "senior" ? p.maxWithdrawSenior : p.maxWithdrawJunior);
-  const limit = mode === "deposit" ? snap.account.usdc : maxOut;
+  const room = snap.status.depositRoom[tranche === "senior" ? 0 : 1];
+  const limit = mode === "deposit" ? Math.min(snap.account.usdc, room) : maxOut;
 
   const submit = async () => {
     setBusy(true);
@@ -142,7 +143,9 @@ export function LpForm({ snap, onDeposit, onWithdraw }: FormProps) {
       : amount <= 0
         ? "Enter an amount"
         : amount > limit + 0.01
-          ? mode === "deposit" ? "Not enough USDC" : "More than withdrawable"
+          ? mode === "deposit"
+            ? snap.status.depositsPaused ? "Deposits paused" : amount > room ? `Over the ${tranche} cap` : `Not enough ${CFG.asset}`
+            : "More than withdrawable"
           : `${mode === "deposit" ? "Deposit" : "Withdraw"} ${usd(amount)}`;
 
   return (
@@ -162,7 +165,7 @@ export function LpForm({ snap, onDeposit, onWithdraw }: FormProps) {
       </div>
       <div className="field">
         <label htmlFor="lp-amt">
-          <span>Amount (USDC)</span>
+          <span>Amount ({CFG.asset})</span>
           <span>{mode === "deposit" ? `Balance ${usd(snap.account.usdc)}` : `Withdrawable ${usd(maxOut)}`}</span>
         </label>
         <div className="input-max">
@@ -173,6 +176,7 @@ export function LpForm({ snap, onDeposit, onWithdraw }: FormProps) {
       <div className="summary">
         <div className="row"><span>Your {tranche}</span><span>{usd(mine)}</span></div>
         <div className="row"><span>Withdrawable now</span><span>{usd(maxOut)}</span></div>
+        {Number.isFinite(room) && <div className="row"><span>Room under the {tranche} cap</span><span>{usd(room)}</span></div>}
       </div>
       <button className="btn" disabled={busy || amount <= 0 || amount > limit + 0.01} onClick={submit}>{label}</button>
       {tranche === "junior" && (

@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import type { Address } from "viem";
+import { parseAbi, type Address } from "viem";
 import { CFG, pub, yesId, noId, marketOf, type Abis, type Deployment } from "./chain";
 import { breakdown, type MarketParams, type RiskBreakdown, type RiskParams } from "./risk";
 
@@ -39,12 +39,14 @@ export type PositionView = {
   flaggedSince: number; // 0 = not flagged
   bonusBps: number;
   pnl: number;
+  /** The market's CTF condition has resolved: close/liquidate are off, `settle` pays out (after `redeem`). */
+  resolved: boolean;
 };
 
 export type Activity = {
   key: string;
   t: number;
-  kind: "Opened" | "Closed" | "Liquidated" | "Absorbed" | "InventorySold" | "Flagged" | "MarginAdded";
+  kind: "Opened" | "Closed" | "Liquidated" | "Absorbed" | "InventorySold" | "Flagged" | "MarginAdded" | "Settled" | "Redeemed";
   id?: bigint;
   text: string;
 };
@@ -83,7 +85,20 @@ export type Snapshot = {
   };
   activity: Activity[];
   history: HistoryPoint[][];
+  /** Launch guards and resolution state (defaults when the deployed contracts predate them). */
+  status: {
+    pmPaused: boolean;
+    depositsPaused: boolean;
+    venueActive: boolean; // KeeperVenue: false while the market maker is offline
+    venueSpread: number; // fill = oracle * (1 +/- spread)
+    depositRoom: [number, number]; // senior, junior headroom under the deposit caps (Infinity = uncapped)
+    maxPositionBorrow: number[]; // per market, 0 = unlimited
+    resolved: boolean[]; // per market: condition reported
+    redeemed: boolean[]; // per market: manager's shares redeemed (settle available)
+  };
 };
+
+const VENUE_ABI = parseAbi(["function active() view returns (bool)", "function spreadBps() view returns (uint256)"]);
 
 type Opened = { id: bigint; owner: Address; tokenId: bigint; margin: bigint; borrowed: bigint; shares: bigint };
 
@@ -177,6 +192,19 @@ class EventStore {
       case "Absorbed":
         this.gone.add(a.id);
         push("Absorbed", `#${a.id} absorbed: underwater, shares to backstop inventory (no fire-sale)`, a.id);
+        break;
+      case "Settled":
+        this.gone.add(a.id);
+        push(
+          "Settled",
+          a.badDebt > 0n
+            ? `#${a.id} settled at resolution: $${fmt0(n6(a.badDebt))} shortfall written off`
+            : `#${a.id} settled at resolution: $${fmt0(n6(a.toOwner))} to the trader`,
+          a.id,
+        );
+        break;
+      case "Redeemed":
+        push("Redeemed", `Market resolved: shares redeemed, $${fmt0(n6(a.toPool))} of backstop inventory to junior`);
         break;
       case "InventorySold":
         push("InventorySold", `Backstop sold ${fmt0(n6(a.shares))} ${side(a.tokenId)} shares: $${fmt0(n6(a.proceeds))} to junior`);
@@ -394,6 +422,7 @@ async function read(
         flaggedSince: Number(since),
         bonusBps: Number(bonus),
         pnl: value - debt - margin,
+        resolved: false as boolean, // filled in from status below
       } satisfies PositionView;
     }),
   );
@@ -406,7 +435,9 @@ async function read(
       ])
     : Promise.resolve([0n, 0n, 0n] as const);
 
+  const status = await readStatus(d, abi);
   const [markets, pool, fees, positions, [usdc, srShares, jrShares]] = await Promise.all([marketsP, poolP, feesP, positionsP, acctP]);
+  for (const p of positions) p.resolved = status.resolved[p.market] ?? false;
   const [srAssets, jrAssets] = account
     ? await Promise.all([
         r<bigint>(d.senior, "vault", "convertToAssets", [srShares]),
@@ -465,5 +496,39 @@ async function read(
     },
     activity: [...store.activity].reverse().slice(0, 40),
     history,
+    status,
+  };
+}
+
+async function readStatus(d: Deployment, abi: Abis): Promise<Snapshot["status"]> {
+  // Older deployments lack these functions: a revert means "feature not there", so fall back to the safe default.
+  const r = <T,>(address: Address, a: keyof Abis, functionName: string, args: unknown[], dflt: T) =>
+    (pub.readContract({ address, abi: abi[a], functionName, args }) as Promise<T>).catch(() => dflt);
+  const MAX = 2n ** 255n;
+  const room = (x: bigint) => (x >= MAX ? Infinity : n6(x));
+  const ids = Array.from({ length: d.markets }, (_, i) => i);
+  const spread = (pub.readContract({ address: d.venue, abi: VENUE_ABI, functionName: "spreadBps" }) as Promise<bigint>).catch(() => 50n);
+  const [venueSpreadBps, pmPaused, depositsPaused, venueActive, srRoom, jrRoom, maxPos, resolved, redeemed] = await Promise.all([
+    spread,
+    r<boolean>(d.positionManager, "pm", "paused", [], false),
+    r<boolean>(d.pool, "pool", "depositsPaused", [], false),
+    d.venueType === "keeper"
+      ? (pub.readContract({ address: d.venue, abi: VENUE_ABI, functionName: "active" }) as Promise<boolean>).catch(() => true)
+      : Promise.resolve(true),
+    r<bigint>(d.pool, "pool", "maxDepositable", [0], MAX),
+    r<bigint>(d.pool, "pool", "maxDepositable", [1], MAX),
+    Promise.all(ids.map((i) => r<bigint>(d.risk, "risk", "maxPositionBorrow", [yesId(d, i)], 0n))),
+    Promise.all(ids.map((i) => (d.conditionIds ? r<boolean>(d.positionManager, "pm", "isResolved", [yesId(d, i)], false) : false))),
+    Promise.all(ids.map((i) => (d.conditionIds ? r<boolean>(d.positionManager, "pm", "redeemed", [d.conditionIds[i]], false) : false))),
+  ]);
+  return {
+    pmPaused,
+    depositsPaused,
+    venueActive,
+    venueSpread: Number(venueSpreadBps) / 10_000,
+    depositRoom: [room(srRoom), room(jrRoom)],
+    maxPositionBorrow: maxPos.map(n6),
+    resolved,
+    redeemed,
   };
 }

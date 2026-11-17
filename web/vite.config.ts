@@ -6,7 +6,7 @@ import react from "@vitejs/plugin-react";
 const ROOT = resolve(__dirname, "..");
 
 const ABIS = ["PositionManager", "RiskEngine", "KeeperOracle", "LendingPool", "TrancheVault", "MockUSDC"];
-const NETS = ["local", "amoy"];
+const NETS = ["local", "amoy", "polygon"];
 const abiOf = (c: string) => {
   const f = resolve(ROOT, `contracts/out/${c}.sol/${c}.json`);
   return existsSync(f) ? JSON.stringify(JSON.parse(readFileSync(f, "utf8")).abi) : null;
@@ -47,7 +47,7 @@ function protocolFiles(): Plugin {
         if (dep || m) {
           if (!body) {
             res.statusCode = 404;
-            res.end(m ? "ABI not found: run forge build" : `no deployment ${dep?.[1]}: run demo/replay.sh (local) or demo/amoy.sh deploy`);
+            res.end(m ? "ABI not found: run forge build" : `no deployment ${dep?.[1]}: run demo/replay.sh (local), demo/amoy.sh deploy, or demo/polygon.sh deploy`);
             return;
           }
           res.setHeader("content-type", "application/json");
