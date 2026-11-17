@@ -59,7 +59,10 @@ function useWallet() {
   const { address, chainId, isConnected, connector } = useAccount();
   // record every request the connected wallet handles (see walletTrace.ts)
   useEffect(() => {
-    if (connector) connector.getProvider().then((p) => traceProvider(p, connector.name), () => {});
+    // while wagmi rehydrates a previous session, `connector` can be a plain object without methods
+    if (connector && typeof connector.getProvider === "function") {
+      connector.getProvider().then((p) => traceProvider(p, connector.name), () => {});
+    }
   }, [connector]);
   const { connectors, connectAsync, isPending } = useConnect();
   const { disconnect } = useDisconnect();
