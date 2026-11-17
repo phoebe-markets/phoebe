@@ -13,6 +13,8 @@ and every market ends in a jump to 0 or 1.
 | `keeper/` | Bun + viem keeper: pushes oracle prices (live Polymarket or historical replay) and runs liquidate / absorb / inventory sales |
 | `web/` | Vite + React + viem dashboard: market risk breakdown, price and max-leverage history, trading, positions, LP tranches, activity |
 | `demo/replay.sh` | One command: historical local chain + deploy + keeper replay + demo traders |
+| `demo/amoy.sh` | Polygon Amoy testnet: balances / deploy / run the live keeper (`deployments/amoy.json`) |
+| `demo/install-keeper-service.sh` | Install the live Amoy keeper as a systemd service on a server (runs on `earth`) |
 | `NOTES.md` | Open items (live Polymarket order routing) |
 
 ## How the risk engine works
