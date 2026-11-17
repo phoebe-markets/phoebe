@@ -2,7 +2,19 @@
 
 ## Can a contract place orders through Polymarket's API?
 
-**Status (2026-11-16):** the on-chain half is **answered: yes**. The off-chain half (the CLOB API) is ready to test.
+**ANSWER (2026-11-16): on-chain yes, API no, so we use Path B (keeper/solver).**
+- The exchange contract accepts our EIP-1271 maker (fork test + mainnet preflight).
+- The CLOB API rejects it. Live test from Norway (via `--ssh earth`), signer `0xce4b39e23d52d6a19c2b73c559ba97575c4ce7a2`:
+  1. Order posted with the EOA's API key: `400 "the order signer address has to be the address of the API KEY"`. A 1271
+     order's signer must be the contract, so the key would have to belong to the contract.
+  2. API key for the contract address (ClobAuth signed by the owner EOA, digest pre-approved on the contract for
+     EIP-1271): `401 "Invalid L1 Request headers"` on both derive and create.
+  3. Control: the same request for the EOA's own address with a 15s-old timestamp gets a 200, so (2) isn't a timing issue.
+  The API authenticates by ECDSA recovery (or its own deposit-wallet registry), never via EIP-1271, so only Polymarket's
+  own deposit wallets can be 1271 makers. Worth asking Polymarket (builder program) whether contract makers can be
+  allowlisted, but don't depend on it.
+
+**Status before the live test:** the on-chain half was answered: yes. The off-chain half was ready to test.
 - `contracts/src/polymarket/PolymarketOrderSigner.sol`: an EIP-1271 maker that accepts either an owner ERC-7739
   signature (under its own domain, "PhoebeOrderSigner") or an owner pre-approved order hash (the vault design).
 - `contracts/test/PolymarketFork.t.sol` (run with `POLYGON_RPC=... forge test --mc PolymarketFork`): the **real deployed

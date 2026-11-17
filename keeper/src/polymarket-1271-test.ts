@@ -21,6 +21,13 @@
  *   bun keeper/src/polymarket-1271-test.ts test <tokenId> --mode hash --yes   # post + cancel (vault design)
  *   bun keeper/src/polymarket-1271-test.ts test <tokenId> --mode 7739 --yes   # post + cancel (owner signature)
  *   bun keeper/src/polymarket-1271-test.ts withdraw --yes          # pUSD back to PK
+ *   bun keeper/src/polymarket-1271-test.ts apikey-contract --yes --ssh earth   # try an API key OWNED BY THE CONTRACT
+ *   bun keeper/src/polymarket-1271-test.ts test <tokenId> --contract-key --yes --ssh earth   # post with that key
+ *
+ * Why apikey-contract: the CLOB answered "the order signer address has to be the address of the API KEY". A 1271
+ * order's signer must be the contract, so the API key has to belong to the contract. We sign ClobAuth for the
+ * contract address with the owner EOA and pre-approve its digest on the contract (in case the server verifies via
+ * EIP-1271). If the server instead ecrecovers, or only knows its own deposit wallets, this fails, and that settles it.
  *
  * Rehearsal without real funds: point POLYGON_RPC at an Anvil fork of Polygon and use an Anvil key, then
  * `test <tokenId> --mode hash --yes --no-post` (on-chain steps run on the fork; nothing is posted to Polymarket).
@@ -55,6 +62,7 @@ import {
   type Hex,
 } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
+import { hashTypedData } from "viem";
 import { polygon } from "viem/chains";
 import { ClobClient, OrderType, Side, SignatureTypeV2, type ApiKeyCreds } from "@polymarket/clob-client-v2";
 
@@ -141,6 +149,33 @@ const transport = http(process.env.POLYGON_RPC ?? "https://polygon-bor-rpc.publi
 const pub = createPublicClient({ chain: polygon, transport });
 const wallet = createWalletClient({ chain: polygon, transport, account });
 
+const CONTRACT_CREDS = join(process.env.HOME ?? ".", ".phoebe", "polymarket-contract-creds.json");
+const CLOB_AUTH_MSG = "This message attests that I control the given wallet"; // clob-client-v2 MSG_TO_SIGN
+const CLOB_AUTH_TYPES = {
+  ClobAuth: [
+    { name: "address", type: "address" },
+    { name: "timestamp", type: "string" },
+    { name: "nonce", type: "uint256" },
+    { name: "message", type: "string" },
+  ],
+} as const;
+
+/**
+ * An ethers-style signer for clob-client-v2 that REPORTS the contract address (so L1/L2 auth headers and
+ * order.signer say "contract") but SIGNS with the owner EOA.
+ */
+function contractSigner(contract: Address) {
+  return {
+    getAddress: async () => contract,
+    _signTypedData: (domain: Record<string, unknown>, types: Record<string, { name: string; type: string }[]>, value: Record<string, unknown>) => {
+      // primary type = the one no other type references (viem needs it explicitly; ethers infers it)
+      const referenced = new Set(Object.values(types).flatMap((fs) => fs.map((f) => f.type.replace(/\[\]$/, ""))));
+      const primaryType = Object.keys(types).find((t) => !referenced.has(t))!;
+      return wallet.signTypedData({ domain, types, primaryType, message: value } as never);
+    },
+  };
+}
+
 const usd = (x: bigint) => `$${formatUnits(x, 6)}`;
 const signerAddress = (): Address => {
   if (!existsSync(STATE)) throw new Error(`no signer deployed yet (${STATE}); run: deploy --yes`);
@@ -206,6 +241,45 @@ async function geoblock(): Promise<{ blocked: boolean; country?: string; ip?: st
 }
 
 // ---------------------------------------------------------------- commands
+
+/** Try to get CLOB API credentials owned by the contract (see header). */
+async function apikeyContract() {
+  const s = signerAddress();
+  const ts = Math.floor(Date.now() / 1000);
+  const nonce = 0n;
+  const domain = { name: "ClobAuthDomain", version: "1", chainId: 137 } as const;
+  const message = { address: s, timestamp: String(ts), nonce, message: CLOB_AUTH_MSG };
+  const digest = hashTypedData({ domain, types: CLOB_AUTH_TYPES, primaryType: "ClobAuth", message });
+  const sig = await wallet.signTypedData({ domain, types: CLOB_AUTH_TYPES, primaryType: "ClobAuth", message });
+  console.log(`ClobAuth for contract ${s}: ts ${ts}, digest ${digest}`);
+  await tx(`signer.approveHash(ClobAuth digest ${digest})`, () =>
+    wallet.writeContract({ address: s, abi: signerAbi().abi, functionName: "approveHash", args: [digest, true] }),
+  );
+  if (!confirmed) return console.log("[dry run] stopping before calling the API (add --yes)");
+
+  const headers = { POLY_ADDRESS: s, POLY_SIGNATURE: sig, POLY_TIMESTAMP: String(ts), POLY_NONCE: String(nonce) };
+  const call = async (method: "get" | "post", path: string) => {
+    try {
+      const r = await axios.request({ method, url: `${HOST}${path}`, headers, timeout: 20_000 });
+      return { status: r.status, data: r.data };
+    } catch (e) {
+      const r = (e as { response?: { status: number; data: unknown } }).response;
+      return { status: r?.status ?? 0, data: r?.data ?? String(e) };
+    }
+  };
+  let res = await call("get", "/auth/derive-api-key");
+  console.log("GET /auth/derive-api-key ->", JSON.stringify(res));
+  if (!(res.data as { apiKey?: string })?.apiKey) {
+    res = await call("post", "/auth/api-key");
+    console.log("POST /auth/api-key ->", JSON.stringify(res));
+  }
+  const raw = res.data as { apiKey?: string; secret?: string; passphrase?: string };
+  if (!raw?.apiKey) return console.log("\nRESULT: the CLOB would NOT issue an API key owned by the contract.");
+  mkdirSync(join(process.env.HOME ?? ".", ".phoebe"), { recursive: true, mode: 0o700 });
+  writeFileSync(CONTRACT_CREDS, JSON.stringify({ address: s, key: raw.apiKey, secret: raw.secret, passphrase: raw.passphrase }), { mode: 0o600 });
+  console.log(`\nRESULT: the CLOB ISSUED an API key owned by the contract (saved to ${CONTRACT_CREDS}, key ${raw.apiKey}).`);
+  console.log("Next: test <tokenId> --contract-key --yes --ssh earth");
+}
 
 async function geo() {
   const g = await geoblock();
@@ -324,12 +398,16 @@ async function test() {
   // ClobSigner's type tracks a newer viem than ours; at runtime it only uses the account and signTypedData.
   const clobSigner = wallet as unknown as ConstructorParameters<typeof ClobClient>[0]["signer"];
   const l1 = new ClobClient({ host: HOST, chain: 137, signer: clobSigner });
+  const useContractKey = has("contract-key");
+  if (useContractKey && !existsSync(CONTRACT_CREDS)) throw new Error("no contract-owned API key yet: run apikey-contract --yes");
+  const contractCreds = useContractKey ? (JSON.parse(readFileSync(CONTRACT_CREDS, "utf8")) as ApiKeyCreds) : undefined;
   // Only touch API credentials when actually posting: deriving a key registers it with Polymarket.
-  const creds = willPost ? (envCreds ?? (await l1.createOrDeriveApiKey())) : undefined;
+  const creds = contractCreds ?? (willPost ? (envCreds ?? (await l1.createOrDeriveApiKey())) : undefined);
   const clob = new ClobClient({
     host: HOST,
     chain: 137,
-    signer: clobSigner,
+    // with a contract-owned key, auth headers must carry the contract address (the EOA still signs)
+    signer: useContractKey ? (contractSigner(s) as unknown as typeof clobSigner) : clobSigner,
     creds,
     signatureType: SignatureTypeV2.POLY_1271,
     funderAddress: s,
@@ -436,7 +514,9 @@ async function test() {
   console.log("DELETE order ->", JSON.stringify(cancel));
 }
 
-const commands: Record<string, () => Promise<void>> = { status, deploy, swap, fund, approve, withdraw, test, geo };
+const commands: Record<string, () => Promise<void>> = {
+  status, deploy, swap, fund, approve, withdraw, test, geo, "apikey-contract": apikeyContract,
+};
 if (!commands[cmd]) {
   console.error(`commands: ${Object.keys(commands).join(", ")}  (see the header of this file)`);
   process.exit(1);
