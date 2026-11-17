@@ -99,7 +99,9 @@ export function TradePanel({ m, snap, side, setSide, onOpen }: Props) {
       <button className="btn" disabled={!canOpen || busy} onClick={submit}>
         {busy
           ? "Opening…"
-          : resolved
+          : !snap.account.address
+            ? "Connect a wallet to trade"
+            : resolved
             ? "Market resolved"
             : !s.openAllowed
               ? "Market closed to new positions"

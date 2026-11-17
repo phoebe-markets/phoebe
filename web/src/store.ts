@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import type { Address } from "viem";
-import { pub, yesId, noId, type Abis, type Deployment } from "./chain";
+import { CFG, pub, yesId, noId, type Abis, type Deployment } from "./chain";
 import { breakdown, type MarketParams, type RiskBreakdown, type RiskParams } from "./risk";
 
 const WAD = 1e18;
@@ -69,7 +69,7 @@ export type Snapshot = {
   };
   fees: { openFeeBps: number; liqFeeBps: number; bonusBps: number; rampPerHour: number; maxBonusBps: number };
   account: {
-    address: Address;
+    address: Address | null; // null until a wallet is connected (read-only view)
     usdc: number;
     seniorShares: bigint;
     juniorShares: bigint;
@@ -97,7 +97,9 @@ class EventStore {
   constructor(
     private d: Deployment,
     private abi: Abis,
-  ) {}
+  ) {
+    this.fromBlock = BigInt(d.deployBlock ?? 0); // nothing of ours exists before the deploy
+  }
 
   private pending: Promise<void> = Promise.resolve();
 
@@ -107,8 +109,15 @@ class EventStore {
     return this.pending;
   }
 
-  private async syncOnce(toBlock: bigint) {
-    if (toBlock < this.fromBlock) return;
+  /** Catch up to `head` in chunks: public RPCs cap the eth_getLogs block range. */
+  private async syncOnce(head: bigint) {
+    while (this.fromBlock <= head) {
+      const end = this.fromBlock + CFG.logChunk - 1n;
+      await this.syncRange(end < head ? end : head);
+    }
+  }
+
+  private async syncRange(toBlock: bigint) {
     const range = { fromBlock: this.fromBlock, toBlock };
     const [oracleLogs, pmLogs] = await Promise.all([
       pub.getContractEvents({ address: this.d.oracle, abi: this.abi.oracle, eventName: "PriceUpdated", ...range }),
@@ -211,7 +220,7 @@ async function loadParams(d: Deployment, abi: Abis) {
   return { riskParams, marketParams };
 }
 
-export function useProtocol(d: Deployment | null, abi: Abis | null, account: Address | null, pollMs = 1000) {
+export function useProtocol(d: Deployment | null, abi: Abis | null, account: Address | null, pollMs = CFG.pollMs) {
   const [snap, setSnap] = useState<Snapshot | null>(null);
   const [error, setError] = useState<string | null>(null);
   const storeRef = useRef<EventStore | null>(null);
@@ -219,7 +228,7 @@ export function useProtocol(d: Deployment | null, abi: Abis | null, account: Add
   const [tick, setTick] = useState(0);
 
   useEffect(() => {
-    if (!d || !abi || !account) return;
+    if (!d || !abi) return;
     let alive = true;
     let busy = false;
     storeRef.current ??= new EventStore(d, abi);
@@ -254,7 +263,7 @@ export function useProtocol(d: Deployment | null, abi: Abis | null, account: Add
 async function read(
   d: Deployment,
   abi: Abis,
-  account: Address,
+  account: Address | null,
   store: EventStore,
   params: Awaited<ReturnType<typeof loadParams>>,
 ): Promise<Snapshot> {
@@ -321,7 +330,9 @@ async function read(
     r<bigint>(d.positionManager, "pm", "maxLiquidationBonusBps"),
   ]);
 
-  const mine = [...store.opened.values()].filter((o) => o.owner.toLowerCase() === account.toLowerCase() && !store.gone.has(o.id));
+  const mine = account
+    ? [...store.opened.values()].filter((o) => o.owner.toLowerCase() === account.toLowerCase() && !store.gone.has(o.id))
+    : [];
   const positionsP = Promise.all(
     mine.map(async (o) => {
       const [h, since, bonus] = await Promise.all([
@@ -360,17 +371,21 @@ async function read(
     }),
   );
 
-  const acctP = Promise.all([
-    r<bigint>(d.usdc, "usdc", "balanceOf", [account]),
-    r<bigint>(d.senior, "vault", "balanceOf", [account]),
-    r<bigint>(d.junior, "vault", "balanceOf", [account]),
-  ]);
+  const acctP = account
+    ? Promise.all([
+        r<bigint>(d.usdc, "usdc", "balanceOf", [account]),
+        r<bigint>(d.senior, "vault", "balanceOf", [account]),
+        r<bigint>(d.junior, "vault", "balanceOf", [account]),
+      ])
+    : Promise.resolve([0n, 0n, 0n] as const);
 
   const [markets, pool, fees, positions, [usdc, srShares, jrShares]] = await Promise.all([marketsP, poolP, feesP, positionsP, acctP]);
-  const [srAssets, jrAssets] = await Promise.all([
-    r<bigint>(d.senior, "vault", "convertToAssets", [srShares]),
-    r<bigint>(d.junior, "vault", "convertToAssets", [jrShares]),
-  ]);
+  const [srAssets, jrAssets] = account
+    ? await Promise.all([
+        r<bigint>(d.senior, "vault", "convertToAssets", [srShares]),
+        r<bigint>(d.junior, "vault", "convertToAssets", [jrShares]),
+      ])
+    : [0n, 0n];
 
   // History: rebuild each market's leverage limit at every oracle update from (price, sigma, time).
   const history = Array.from({ length: d.markets }, (_, i) => {

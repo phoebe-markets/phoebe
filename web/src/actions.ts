@@ -1,5 +1,5 @@
 import { BaseError, ContractFunctionRevertedError, maxUint256, type Abi, type Address } from "viem";
-import { pub, type Abis, type Deployment, type Wallet } from "./chain";
+import { CFG, ensureChain, pub, type Abis, type Deployment, type Wallet } from "./chain";
 
 const USD = 1_000_000;
 export const toUsdc = (x: number) => BigInt(Math.round(x * USD));
@@ -33,6 +33,7 @@ export function explain(e: unknown): string {
 }
 
 async function write(w: Wallet, address: Address, abi: Abi, functionName: string, args: unknown[]) {
+  if (CFG.wallet === "injected") await ensureChain(w); // the user may have switched networks in their wallet
   const { request } = await pub.simulateContract({ account: w.account, address, abi, functionName, args });
   const hash = await w.writeContract(request as never);
   const r = await pub.waitForTransactionReceipt({ hash });
@@ -70,6 +71,10 @@ export async function deposit(w: Wallet, d: Deployment, abi: Abis, tranche: "sen
   await ensureAllowance(w, d, abi, vault, toUsdc(amount));
   return write(w, vault, abi.vault, "deposit", [toUsdc(amount), w.account.address]);
 }
+
+/** Testnet faucet: the mock USDC is freely mintable. */
+export const mintTestUsdc = (w: Wallet, d: Deployment, abi: Abis, amount = 10_000) =>
+  write(w, d.usdc, abi.usdc, "mint", [w.account.address, toUsdc(amount)]);
 
 export const withdraw = (w: Wallet, d: Deployment, abi: Abis, tranche: "senior" | "junior", amount: number) =>
   write(w, d[tranche], abi.vault, "withdraw", [toUsdc(amount), w.account.address, w.account.address]);
