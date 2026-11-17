@@ -48,6 +48,8 @@ type NetConfig = {
   logChunk: bigint; // eth_getLogs block range per call
   wallet: "demo" | "injected";
   explorer?: string;
+  /** Some chains enforce a minimum priority fee that wallets don't know about (Amoy: 25 gwei). */
+  minTipGwei?: number;
 };
 
 export const NETWORKS: Record<Net, NetConfig> = {
@@ -67,6 +69,7 @@ export const NETWORKS: Record<Net, NetConfig> = {
     logChunk: 5_000n, // publicnode caps eth_getLogs at 10k blocks
     wallet: "injected",
     explorer: "https://amoy.polygonscan.com",
+    minTipGwei: 30, // node minimum is 25; wallets default to ~1.5 and get rejected
   },
 };
 

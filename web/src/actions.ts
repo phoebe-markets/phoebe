@@ -1,5 +1,5 @@
-import { BaseError, ContractFunctionRevertedError, maxUint256, type Abi, type Address } from "viem";
-import { pub, type Abis, type Deployment, type Wallet } from "./chain";
+import { BaseError, ContractFunctionRevertedError, maxUint256, parseGwei, type Abi, type Address } from "viem";
+import { CFG, pub, type Abis, type Deployment, type Wallet } from "./chain";
 import { lastWalletFailure } from "./walletTrace";
 
 const USD = 1_000_000;
@@ -45,9 +45,17 @@ export function explain(e: unknown): string {
   return (e as Error).message;
 }
 
+/** Suggested EIP-1559 fees honouring the chain's minimum tip (wallets show these as "site suggested"). */
+async function fees() {
+  if (!CFG.minTipGwei) return {};
+  const tip = parseGwei(String(CFG.minTipGwei));
+  const base = (await pub.getBlock()).baseFeePerGas ?? 0n;
+  return { maxPriorityFeePerGas: tip, maxFeePerGas: base * 2n + tip };
+}
+
 async function write(w: Wallet, address: Address, abi: Abi, functionName: string, args: unknown[]) {
   const { request } = await pub.simulateContract({ account: w.account, address, abi, functionName, args });
-  const hash = await w.writeContract(request as never);
+  const hash = await w.writeContract({ ...(request as object), ...(await fees()) } as never);
   const r = await pub.waitForTransactionReceipt({ hash });
   if (r.status !== "success") throw new Error(`transaction reverted (${hash})`);
   return r;
