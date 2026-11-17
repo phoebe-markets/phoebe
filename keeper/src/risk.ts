@@ -1,5 +1,5 @@
 import { BaseError, ContractFunctionRevertedError, maxUint256 } from "viem";
-import { ABI, LOG_CHUNK, type Clients, type Deployment, WAD, fmtUsd, log } from "./config";
+import { ABI, LOG_CHUNK, type Clients, type Deployment, WAD, fees, fmtUsd, log, noId, yesId } from "./config";
 
 type Health = {
   priceWad: bigint;
@@ -28,13 +28,16 @@ export type RiskKeeperOpts = {
  *     growing bonus makes it profitable at the current price after a slippage buffer
  *   - absorbs underwater positions into the backstop inventory (the contract refuses to fire-sell them)
  *   - sells each absorbed lot once its cool-off has passed, or when its market has resolved (price 0 or 1)
+ *   - once a market's CTF condition resolves: redeems everything the manager holds there (`redeem`), then pays out
+ *     each remaining position at the resolved value (`settle`). Absorbed inventory is redeemed with it.
  */
 export class RiskKeeper {
   private open = new Set<bigint>();
   private tokenOfPos = new Map<bigint, bigint>(); // from Opened events, so liquidations never rescan logs
   private lots: Lot[] = [];
+  private resolved = new Set<bigint>(); // token ids of redeemed markets
   private fromBlock = 0n;
-  stats = { liquidations: 0, absorbs: 0, inventorySales: 0, skippedUnprofitable: 0, failed: 0 };
+  stats = { liquidations: 0, absorbs: 0, inventorySales: 0, settled: 0, skippedUnprofitable: 0, failed: 0 };
 
   constructor(
     private c: Clients,
@@ -63,6 +66,7 @@ export class RiskKeeper {
           this.tokenOfPos.set(a.id, a.tokenId);
           break;
         case "Closed":
+        case "Settled":
         case "Liquidated":
           this.open.delete(a.id);
           break;
@@ -79,8 +83,9 @@ export class RiskKeeper {
     const head = await this.c.pub.getBlockNumber();
     while (this.fromBlock <= head) await this.sync();
     const now = (await this.c.pub.getBlock()).timestamp;
+    await this.settleResolved();
     // read every position's health in parallel (batched into one HTTP request), then act sequentially
-    const ids = [...this.open];
+    const ids = [...this.open].filter((id) => !this.resolved.has(this.tokenOfPos.get(id) ?? -1n));
     const healths = (await Promise.all(
       ids.map((id) =>
         this.c.pub.readContract({ address: this.d.positionManager, abi: ABI.pm, functionName: "health", args: [id] }),
@@ -153,6 +158,7 @@ export class RiskKeeper {
   private async sellDueLots(now: bigint) {
     const keep: Lot[] = [];
     for (const lot of this.lots) {
+      if (this.resolved.has(lot.tokenId)) continue; // redeemed along with the market
       const [price] = (await this.c.pub.readContract({
         address: this.d.oracle,
         abi: ABI.oracle,
@@ -176,6 +182,45 @@ export class RiskKeeper {
       log(`sold inventory token ${lot.tokenId}: ${fmtUsd(result as bigint)} back to junior${resolved ? " (resolved)" : ""}`);
     }
     this.lots = keep;
+  }
+
+  /** Redeem newly resolved markets, then settle every open position in a redeemed market. */
+  private async settleResolved() {
+    if (!this.d.conditionIds) return; // deployment without settlement wiring
+    const pm = { address: this.d.positionManager, abi: ABI.pm } as const;
+    for (let i = 0; i < this.d.markets; i++) {
+      const [yes, no, cond] = [yesId(this.d, i), noId(this.d, i), this.d.conditionIds[i]];
+      if (this.resolved.has(yes)) continue;
+      const done = (await this.c.pub.readContract({ ...pm, functionName: "redeemed", args: [cond] })) as boolean;
+      if (!done) {
+        const resolved = (await this.c.pub.readContract({ ...pm, functionName: "isResolved", args: [yes] })) as boolean;
+        if (!resolved) continue;
+        try {
+          const { request } = await this.c.pub.simulateContract({ ...pm, account: this.c.account, functionName: "redeem", args: [cond] });
+          await this.send(request);
+          log(`market ${i} resolved: redeemed the manager's shares`);
+        } catch (e) {
+          this.stats.failed++;
+          log(`market ${i}: redeem failed (${revertName(e) ?? (e as Error).message.split("\n")[0]}), will retry`);
+          continue;
+        }
+      }
+      this.resolved.add(yes);
+      this.resolved.add(no);
+    }
+    for (const id of [...this.open]) {
+      if (!this.resolved.has(this.tokenOfPos.get(id) ?? -1n)) continue;
+      try {
+        const { request } = await this.c.pub.simulateContract({ ...pm, account: this.c.account, functionName: "settle", args: [id] });
+        await this.send(request);
+        this.open.delete(id);
+        this.stats.settled++;
+        log(`settled #${id} at resolution`);
+      } catch (e) {
+        this.stats.failed++;
+        log(`#${id}: settle failed (${revertName(e) ?? (e as Error).message.split("\n")[0]}), will retry`);
+      }
+    }
   }
 
   private async recycle(tokenId: bigint, shares: bigint) {
@@ -207,7 +252,7 @@ export class RiskKeeper {
   // ABIs are loaded at runtime (no static types), so simulateContract's request is passed through as-is.
   // biome-ignore lint/suspicious/noExplicitAny: see above
   private async send(request: any) {
-    const hash = await this.c.wallet.writeContract(request);
+    const hash = await this.c.wallet.writeContract({ ...request, ...(await fees(this.c)) });
     const r = await this.c.pub.waitForTransactionReceipt({ hash });
     if (r.status !== "success") {
       const tx = await this.c.pub.getTransaction({ hash });
@@ -220,6 +265,11 @@ export class RiskKeeper {
       }
       throw new Error(`tx reverted (reason not reproducible): ${hash}`);
     }
+  }
+
+  /** True once market i has been redeemed (no more price pushes needed). */
+  isResolvedMarket(i: number) {
+    return this.resolved.has(yesId(this.d, i));
   }
 
   get openCount() {

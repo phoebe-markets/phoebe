@@ -115,3 +115,20 @@ export function marketOf(d: { tokenIds?: string[]; markets: number }, tokenId: b
 export const WAD = 10n ** 18n;
 export const fmtUsd = (x: bigint) => `$${(Number(x) / 1e6).toLocaleString("en-US", { maximumFractionDigits: 0 })}`;
 export const log = (...a: unknown[]) => console.log(new Date().toISOString().slice(11, 19), ...a);
+
+const alerted = new Map<string, number>();
+/**
+ * Log an operational alert and, if NTFY_TOPIC is set, push it to ntfy.sh/<topic> (at most every 30 minutes per key).
+ * Messages are generic (no keys, no balances beyond gas levels); pick an unguessable topic name.
+ */
+export async function alert(key: string, msg: string) {
+  log(`ALERT ${msg}`);
+  const topic = process.env.NTFY_TOPIC;
+  if (!topic || (alerted.get(key) ?? 0) > Date.now() - 1_800_000) return;
+  alerted.set(key, Date.now());
+  try {
+    await fetch(`https://ntfy.sh/${topic}`, { method: "POST", body: msg, headers: { Title: "phoebe keeper" } });
+  } catch {
+    // alerting must never take the keeper down
+  }
+}

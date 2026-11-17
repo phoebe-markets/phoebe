@@ -29,7 +29,7 @@
  */
 import { formatUnits, maxUint256, parseUnits, type Address, type Hex } from "viem";
 import { OrderType, Side, type ClobClient, type OrderBookSummary } from "@polymarket/clob-client-v2";
-import { ABI_EXTRA, clients, loadDeployment, log, noId, send, yesId, type Clients, type Deployment } from "./config";
+import { ABI_EXTRA, alert, clients, loadDeployment, log, noId, send, yesId, type Clients, type Deployment } from "./config";
 import {
   ADAPTER_ABI,
   CTF_ABI,
@@ -311,7 +311,7 @@ export class Hedger {
   }
 
   private async setVenue(on: boolean, problems: string[]) {
-    if (problems.length) log(`hedger: ${problems.join("; ")}`);
+    if (problems.length) await alert("hedger", `hedger: ${problems.join("; ")}`);
     const active = (await this.c.pub.readContract({
       address: this.d.venue,
       abi: this.extra.keeperVenue,

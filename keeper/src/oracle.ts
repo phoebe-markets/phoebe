@@ -1,5 +1,5 @@
 import { readFileSync } from "node:fs";
-import { ABI, type Clients, type Deployment, WAD, log, noId, yesId } from "./config";
+import { ABI, type Clients, type Deployment, WAD, fees, log, noId, yesId } from "./config";
 
 /** Next prices, plus the chain timestamp they should land at (replay) or undefined (live: now). */
 export type Step = { prices: (bigint | undefined)[]; timestamp?: bigint };
@@ -84,6 +84,7 @@ export async function pushPrices(c: Clients, d: Deployment, prices: (bigint | un
     abi: ABI.oracle,
     functionName: "setPrices",
     args: [ids, px],
+    ...(await fees(c)),
   });
   await c.pub.waitForTransactionReceipt({ hash });
 }

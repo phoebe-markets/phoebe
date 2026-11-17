@@ -22,7 +22,8 @@
  * Env: DEPLOYMENT (default local), RPC_URL (default http://127.0.0.1:8545), KEEPER_PK (default Anvil account #1),
  *      COOL_OFF_SECONDS (21600), hedger limits (see hedger.ts)
  */
-import { clients, loadDeployment, log } from "./config";
+import { alert, clients, loadDeployment, log } from "./config";
+import { formatEther } from "viem";
 import { PolymarketFeed, ReplayFeed, describe, pushPrices } from "./oracle";
 import { RiskKeeper } from "./risk";
 import { DemoTraders } from "./traders";
@@ -95,7 +96,7 @@ function throttle(prices: (bigint | undefined)[]) {
   const beat = Date.now() - lastHeartbeat >= heartbeatMs;
   if (beat) lastHeartbeat = Date.now();
   return prices.map((p, i) => {
-    if (p === undefined) return undefined;
+    if (p === undefined || keeper.isResolvedMarket(i)) return undefined;
     const prev = lastPushed[i];
     const moved = prev === undefined || (p > prev ? p - prev : prev - p) >= minMove;
     if (!moved && !beat) return undefined;
@@ -104,16 +105,25 @@ function throttle(prices: (bigint | undefined)[]) {
   });
 }
 
+const minGas = BigInt(Math.round(Number(process.env.MIN_POL ?? (d.chainId === 137 ? 2 : 0.1)) * 1e18));
 let n = 0;
+let failures = 0;
 for (;;) {
   const step = await feed.next();
   if (!step) break;
   try {
     await pushPrices(c, d, throttle(step.prices), step.timestamp);
     await keeper.sweep();
+    failures = 0;
   } catch (e) {
     if (mode !== "live") throw e;
-    log(`tick failed, retrying next interval: ${(e as Error).message.split("\n")[0]}`); // RPC/API hiccups mustn't kill a live keeper
+    const msg = (e as Error).message.split("\n")[0];
+    log(`tick failed, retrying next interval: ${msg}`); // RPC/API hiccups mustn't kill a live keeper
+    if (++failures >= 3) await alert("tick", `keeper: ${failures} ticks in a row failed (${msg.slice(0, 160)})`);
+  }
+  if (mode === "live" && n % 20 === 0) {
+    const gas = await c.pub.getBalance({ address: c.account.address }).catch(() => undefined);
+    if (gas !== undefined && gas < minGas) await alert("gas", `keeper gas low: ${formatEther(gas)} POL (chain ${d.chainId})`);
   }
   if (traders && n % traderEvery === 0) await traders.step(n);
   if (hedger) await hedger.tick().catch((e) => log(`hedger tick failed: ${(e as Error).message.split("\n")[0]}`));

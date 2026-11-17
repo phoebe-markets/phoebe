@@ -1,5 +1,5 @@
 import { maxUint256, type Address } from "viem";
-import { ABI, ABI_EXTRA, type Clients, type Deployment, fmtUsd, log, noId, yesId } from "./config";
+import { ABI, ABI_EXTRA, type Clients, type Deployment, fees, fmtUsd, log, noId, yesId } from "./config";
 
 const USD = 1_000_000n;
 
@@ -56,7 +56,7 @@ export class Maker {
 
   private async write(address: Address, abi: (typeof ABI)[keyof typeof ABI], functionName: string, args: unknown[], what: string) {
     const { request } = await this.c.pub.simulateContract({ account: this.c.account, address, abi, functionName, args });
-    const hash = await this.c.wallet.writeContract(request as never);
+    const hash = await this.c.wallet.writeContract({ ...(request as object), ...(await fees(this.c)) } as never);
     const r = await this.c.pub.waitForTransactionReceipt({ hash });
     log(`maker: ${what} (${r.status})`);
   }
