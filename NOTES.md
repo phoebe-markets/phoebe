@@ -82,3 +82,9 @@ maker, or only Polymarket's deposit wallets. API keys are also tied to a regular
 - **B (fallback, keeper/solver):** a keeper buys on the CLOB with its own wallet, then sells the
   tokens to the vault in one transaction at a price the vault checks against the oracle.
   This doesn't depend on Polymarket's API.
+
+## Brand: logo font license (hackathon only)
+
+The wordmark (`web/src/brand/logo.ts`) and favicon (`web/public/favicon.svg`) are outlines of "Greek Freak" by
+PINISIART, which is free for personal use only. Buy a commercial license or replace the mark before Phoebe is used
+beyond the hackathon.

@@ -1,0 +1,244 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Phoebe · Leverage for prediction markets</title>
+    <meta name="description" content="Phoebe lends against Polymarket outcome shares, with a risk engine built for prices that jump and markets that end at 0 or 1." />
+    <meta name="theme-color" content="#05060c" />
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" />
+  </head>
+  <body class="landing">
+    <canvas class="stars" aria-hidden="true"></canvas>
+
+    <header class="nav">
+      <a class="nav-brand" href="#top" data-logo="nav" aria-label="Phoebe, home"></a>
+      <nav class="nav-links" aria-label="Sections">
+        <a href="#engine">Engine</a>
+        <a href="#phases">Calculator</a>
+        <a href="#tranches">Tranches</a>
+        <a href="#backtest">Backtest</a>
+      </nav>
+      <a class="btn-moon sm" href="/app/">Launch app</a>
+    </header>
+
+    <main id="top">
+      <!-- HERO -->
+      <section class="hero">
+        <div class="hero-art" aria-hidden="true">
+          <div class="art-glow"></div>
+          <div class="art-lines"></div>
+          <div class="lantern"></div>
+        </div>
+        <div class="hero-copy">
+          <h1>Leverage for <em>prediction markets.</em></h1>
+          <p class="lede">
+            Phoebe lends against Polymarket outcome shares. Post USDC margin, borrow from a tranched LP pool, and
+            trade up to 4× on the markets you believe in. The risk engine is built for what breaks every other
+            lender here: prices jump, and every market ends at 0 or 1.
+          </p>
+          <div class="cta-row">
+            <a class="btn-moon" href="/app/">Launch testnet app</a>
+            <a class="btn-ghost" href="#engine">How the engine works</a>
+          </div>
+        </div>
+        <dl class="proof">
+          <div><dt>LP PnL, 60 unseen markets</dt><dd class="gain">+$523k</dd></div>
+          <div><dt>Same markets, naive 75% LTV</dt><dd class="loss">−$7.98M</dd></div>
+          <div><dt>Senior tranche losses</dt><dd>$0</dd></div>
+          <div><dt>Notional replayed</dt><dd>$118M</dd></div>
+        </dl>
+        <p class="proof-note">Backtest results, not live performance: 60 resolved Polymarket markets replayed through the contracts with synthetic traders. <a href="#backtest">Methodology</a></p>
+      </section>
+
+      <!-- MYTH -->
+      <section class="myth">
+        <p class="greek" lang="grc">Φοίβη · <span>“the radiant”</span></p>
+        <p class="myth-text">
+          Phoebe was the Titaness of the moon, and the keeper of the oracle at Delphi before it passed to Apollo.
+          Ours keeps an oracle too: every price lands on chain with its volatility, so leverage tightens
+          <em>before</em> the market moves, not after.
+        </p>
+      </section>
+
+      <!-- ENGINE -->
+      <section class="section" id="engine">
+        <header class="section-head">
+          <p class="kicker">The risk engine</p>
+          <h2>How the risk engine <em>sets leverage.</em></h2>
+          <p class="section-lede">
+            A position's liquidation LTV is the lowest of four limits, re-evaluated at every oracle update.
+            The binding one is shown in the app, so you always know why your leverage is what it is.
+          </p>
+        </header>
+        <div class="engine-grid">
+          <article class="facet">
+            <span class="numeral" lang="grc">Α</span>
+            <h3>Price bands</h3>
+            <p>No leverage within 3¢ of 0 or 1. It ramps to full between 15¢ and 85¢, where a share has room to move both ways.</p>
+            <code>0.03 · 0.15 — 0.85 · 0.97</code>
+          </article>
+          <article class="facet">
+            <span class="numeral" lang="grc">Β</span>
+            <h3>Time ramp</h3>
+            <p>Scheduled resolutions are known jumps. Leverage fades to zero over the three days before a cutoff 24h ahead of them.</p>
+            <code>ramp 3d · cutoff T − 24h</code>
+          </article>
+          <article class="facet">
+            <span class="numeral" lang="grc">Γ</span>
+            <h3>Volatility + jump cap</h3>
+            <p>The margin cushion must cover a two-sigma day <em>plus</em> a 10¢ gap, so calm markets that suddenly break stay covered.</p>
+            <code>LTV ≤ 1 − (2σ₁ᴅ + 0.10) / p</code>
+          </article>
+          <article class="facet">
+            <span class="numeral" lang="grc">Δ</span>
+            <h3>Absorb, never fire-sell</h3>
+            <p>Underwater positions are written off against junior and their shares sold after a 6h cool-off. A Dutch-auction bonus keeps liquidators in thin books.</p>
+            <code>bonus 3% → +1%/h → 15%</code>
+          </article>
+        </div>
+      </section>
+
+      <!-- PHASES (interactive) -->
+      <section class="section" id="phases">
+        <header class="section-head">
+          <p class="kicker">Leverage calculator</p>
+          <h2>Max leverage, <em>by market state.</em></h2>
+          <p class="section-lede">
+            Set a share price, its volatility and the time to resolution to see the maximum leverage the engine
+            allows, computed with the same code the app runs.
+          </p>
+        </header>
+        <div class="phases card-glass">
+          <div class="phase-controls">
+            <div class="phase-moon">
+              <svg viewBox="-60 -60 120 120" aria-hidden="true">
+                <defs>
+                  <radialGradient id="moon-lit" cx="-15" cy="-20" r="80" gradientUnits="userSpaceOnUse">
+                    <stop offset="0" stop-color="#ffffff" /><stop offset=".55" stop-color="#d7dbe8" /><stop offset="1" stop-color="#9b8cff" />
+                  </radialGradient>
+                </defs>
+                <circle r="50" fill="#0f1222" stroke="rgba(196,204,230,.25)" />
+                <path id="moon-phase" fill="url(#moon-lit)" />
+              </svg>
+              <div class="phase-readout">
+                <span class="mono-label">share price</span>
+                <output id="out-p">50¢</output>
+              </div>
+            </div>
+            <label class="slider">
+              <span>Share price <output id="lab-p">0.50</output></span>
+              <input id="in-p" type="range" min="0.01" max="0.99" step="0.01" value="0.5" />
+            </label>
+            <label class="slider">
+              <span>1-day volatility σ <output id="lab-s">3.0¢</output></span>
+              <input id="in-s" type="range" min="0" max="0.15" step="0.005" value="0.03" />
+            </label>
+            <label class="slider">
+              <span>Days to resolution <output id="lab-t">30</output></span>
+              <input id="in-t" type="range" min="0" max="30" step="0.25" value="30" />
+            </label>
+          </div>
+          <div class="phase-result">
+            <div class="lev">
+              <span class="mono-label">max leverage</span>
+              <output id="out-lev" class="lev-num">2.4×</output>
+              <span class="binding">limited by <b id="out-bind">volatility</b></span>
+            </div>
+            <svg id="lev-chart" class="lev-chart" viewBox="0 0 400 200" role="img" aria-label="Maximum leverage across share prices"></svg>
+            <div class="factor-rows" id="factors"></div>
+          </div>
+        </div>
+      </section>
+
+      <!-- TRANCHES -->
+      <section class="section" id="tranches">
+        <header class="section-head">
+          <p class="kicker">For liquidity providers</p>
+          <h2>Senior and junior <em>tranches.</em></h2>
+          <p class="section-lede">Choose your exposure. Losses run through junior before they can reach senior, and junior is paid for standing in front.</p>
+        </header>
+        <div class="tranches">
+          <article class="tranche senior">
+            <div class="tranche-top"><span class="mono-label">senior · 80%</span><span class="tag">protected</span></div>
+            <h3>Senior</h3>
+            <p>Paid interest first and impaired last. In the 60-market holdout backtest, senior was never impaired.</p>
+            <ul><li>Borrow interest, first claim</li><li>Behind the whole junior tranche</li></ul>
+          </article>
+          <div class="waterfall" aria-hidden="true">
+            <div class="wf-bar"><span class="wf-senior"></span><span class="wf-junior"></span></div>
+            <p class="mono-label">losses land on junior first</p>
+          </div>
+          <article class="tranche junior">
+            <div class="tranche-top"><span class="mono-label">junior · 20%</span><span class="tag">first loss</span></div>
+            <h3>Junior</h3>
+            <p>Takes the first loss on bad debt, and collects the fees that pay for that risk: every opening fee and a cut of every liquidation.</p>
+            <ul><li>0.3% of every amount borrowed</li><li>2% of every liquidation</li></ul>
+          </article>
+        </div>
+        <div class="cta-row"><a class="btn-ghost" href="/app/#lp">Provide liquidity</a></div>
+      </section>
+
+      <!-- BACKTEST -->
+      <section class="section" id="backtest">
+        <header class="section-head">
+          <p class="kicker">Backtest</p>
+          <h2>Replayed on real <em>Polymarket history.</em></h2>
+          <p class="section-lede">
+            60 high-volume resolved markets that were never used for tuning, 10-minute ticks, replayed through the real
+            contracts with a $1M pool each. Synthetic traders open at 90% of the allowed LTV and never exit early.
+          </p>
+        </header>
+        <div class="versus">
+          <div class="vs-cell loss-cell">
+            <span class="mono-label">naive · flat 75% LTV</span>
+            <span class="vs-num loss">−$7.98M</span>
+            <span class="vs-sub">LP PnL, summed over 60 pools</span>
+          </div>
+          <div class="vs-mark" aria-hidden="true">vs</div>
+          <div class="vs-cell gain-cell">
+            <span class="mono-label">phoebe · full engine</span>
+            <span class="vs-num gain">+$523k</span>
+            <span class="vs-sub">LP PnL, same markets, same traders</span>
+          </div>
+        </div>
+        <div class="ladder">
+          <div class="ladder-row"><span>Naive, flat 75% LTV</span><span class="bar"><i class="neg" style="--w: 100%"></i></span><b class="loss">−7,980k</b></div>
+          <div class="ladder-row"><span>Bands + time ramp + volatility</span><span class="bar"><i class="neg" style="--w: 0.6%"></i></span><b class="loss">−15k</b></div>
+          <div class="ladder-row"><span>+ 0.3% opening fee</span><span class="bar"><i class="pos" style="--w: 3.3%"></i></span><b class="gain">+260k</b></div>
+          <div class="ladder-row hl"><span>Full: + jump cap, absorb, auction, caps</span><span class="bar"><i class="pos" style="--w: 6.6%"></i></span><b class="gain">+523k</b></div>
+        </div>
+        <ul class="facts">
+          <li><b>$13k</b> bad debt on $118M notional</li>
+          <li><b>3 / 60</b> markets lost money</li>
+          <li><b>−$3.5k</b> worst market, 1.75% of its junior</li>
+          <li><b>$0</b> senior impairment</li>
+        </ul>
+        <p class="fine">Backtests are not a forecast. Binary markets can always jump to zero; the aim is a profitable LP book across many markets, not zero bad debt.</p>
+      </section>
+
+      <!-- CTA -->
+      <section class="finale">
+        <div class="finale-moon" aria-hidden="true"><svg id="facet-moon" viewBox="-100 -100 200 200"></svg></div>
+        <h2>Try it on <em>testnet.</em></h2>
+        <p class="section-lede">Testnet funds only. Mint mock USDC in the app, open a position, or provide liquidity to either tranche.</p>
+        <div class="cta-row center">
+          <a class="btn-moon" href="/app/">Launch testnet app</a>
+          <a class="btn-ghost" href="/app/?net=local">Open a local replay</a>
+        </div>
+        <pre class="replay"><span class="mono-label">replay the Biden nomination locally</span><code>demo/replay.sh sim/data/biden-nominee.json -- --speed 20 --traders 12</code></pre>
+      </section>
+    </main>
+
+    <footer class="footer">
+      <span data-logo="foot"></span>
+      <p>Leverage on prediction markets. Testnet software, not financial advice.</p>
+      <a href="/app/">App</a>
+    </footer>
+
+    <script type="module" src="/src/landing/main.ts"></script>
+  </body>
+</html>

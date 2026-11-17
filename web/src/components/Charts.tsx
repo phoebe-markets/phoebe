@@ -65,7 +65,7 @@ export function MarketCharts({ history }: { history: HistoryPoint[] }) {
     <div>
       <div className="chart-title">YES price</div>
       <ResponsiveContainer width="100%" height={180}>
-        <LineChart data={data} syncId="mkt" margin={{ top: 6, right: 12, bottom: 0, left: 0 }}>
+        <LineChart data={data} syncId="mkt" margin={{ top: 8, right: 44, bottom: 6, left: 8 }}>
           <CartesianGrid stroke="var(--grid)" vertical={false} />
           <XAxis dataKey="t" type="number" domain={["dataMin", "dataMax"]} tickFormatter={dateTick} {...axisProps} hide />
           <YAxis domain={[0, 1]} ticks={[0, 0.25, 0.5, 0.75, 1]} tickFormatter={(v) => `${Math.round(v * 100)}¢`} width={40} {...axisProps} />
@@ -89,7 +89,7 @@ export function MarketCharts({ history }: { history: HistoryPoint[] }) {
         </span>
       </div>
       <ResponsiveContainer width="100%" height={150}>
-        <LineChart data={data} syncId="mkt" margin={{ top: 6, right: 12, bottom: 0, left: 0 }}>
+        <LineChart data={data} syncId="mkt" margin={{ top: 8, right: 44, bottom: 6, left: 8 }}>
           <CartesianGrid stroke="var(--grid)" vertical={false} />
           <XAxis dataKey="t" type="number" domain={["dataMin", "dataMax"]} tickFormatter={dateTick} minTickGap={40} {...axisProps} />
           <YAxis domain={[1, Math.ceil(maxLev)]} tickFormatter={(v) => `${v}x`} width={40} allowDecimals={false} {...axisProps} />

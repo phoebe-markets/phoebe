@@ -20,11 +20,13 @@ function Why({ s, label }: { s: SideView; label: string }) {
   const w = s.why;
   const drift = Math.abs(w.maxLtv - s.maxLtv) > 0.002; // TS mirror vs contract
   return (
-    <div>
-      <h3>
-        Why long {label} is capped at {lev(1 / (1 - s.maxLtv))}{" "}
+    <div className="why-block">
+      <div className="why-head">
+        <h3>
+          Long {label} is capped at <b>{lev(1 / (1 - s.maxLtv))}</b>
+        </h3>
         {!s.openAllowed && <span className="badge critical">✕ new positions closed</span>}
-      </h3>
+      </div>
       <div className="sub">
         Liquidation LTV = min(base × price band × time ramp, volatility cap). Max opening LTV sits 10 points below it.
       </div>
@@ -42,40 +44,61 @@ function Why({ s, label }: { s: SideView; label: string }) {
   );
 }
 
-export function MarketPanel({ m, history, side, chainTime }: { m: MarketView; history: HistoryPoint[]; side: "YES" | "NO"; chainTime: number }) {
-  const s = side === "YES" ? m.yes : m.no;
+type BarProps = {
+  m: MarketView;
+  markets: { index: number; name: string }[];
+  onPick: (i: number) => void;
+  chainTime: number;
+};
+
+/** The market header: which market, when it resolves, and its key numbers. */
+export function MarketBar({ m, markets, onPick, chainTime }: BarProps) {
   const hoursLeft = (m.resolutionTime - chainTime) / 3600;
+  const left = hoursLeft > 48 ? `${Math.round(hoursLeft / 24)} days` : `${Math.max(0, Math.round(hoursLeft))} h`;
+  return (
+    <section className="marketbar" aria-label="Market">
+      <div className="mb-title">
+        <span className="kicker">Market</span>
+        {markets.length > 1 ? (
+          <select className="market-select" aria-label="Market" value={m.index} onChange={(e) => onPick(Number(e.target.value))}>
+            {markets.map((mk) => (
+              <option key={mk.index} value={mk.index}>{mk.name}</option>
+            ))}
+          </select>
+        ) : (
+          <h1 className="market-name">{m.name}</h1>
+        )}
+        <span className="sub">Resolves {when(m.resolutionTime)} UTC · {left} left</span>
+      </div>
+      <dl className="mb-stats">
+        <div>
+          <dt><i className="key" style={{ background: "var(--series-yes)" }} />YES</dt>
+          <dd>{cents(m.yes.price)}</dd>
+        </div>
+        <div>
+          <dt><i className="key" style={{ background: "var(--series-no)" }} />NO</dt>
+          <dd>{cents(m.no.price)}</dd>
+        </div>
+        <div>
+          <dt>1-day σ</dt>
+          <dd>{cents(m.yes.sigma1d)}</dd>
+        </div>
+        <div className="hl">
+          <dt>Max leverage YES / NO</dt>
+          <dd>{lev(1 / (1 - m.yes.maxLtv))} <span>/</span> {lev(1 / (1 - m.no.maxLtv))}</dd>
+        </div>
+      </dl>
+    </section>
+  );
+}
+
+export function MarketPanel({ m, history, side }: { m: MarketView; history: HistoryPoint[]; side: "YES" | "NO" }) {
+  const s = side === "YES" ? m.yes : m.no;
   return (
     <section className="card" aria-label={`Market ${m.name}`}>
-      <h2>Market</h2>
-      <div style={{ marginBottom: 12 }}>
-        <div style={{ fontSize: 16, fontWeight: 600 }}>{m.name}</div>
-        <div className="sub">
-          Scheduled resolution {when(m.resolutionTime)} UTC ({hoursLeft > 48 ? `${Math.round(hoursLeft / 24)} days` : `${Math.max(0, Math.round(hoursLeft))} h`} left)
-        </div>
-      </div>
-      <div className="tiles">
-        <div className="tile">
-          <div className="label"><i className="key" style={{ background: "var(--series-yes)" }} />YES price</div>
-          <div className="value">{cents(m.yes.price)}</div>
-        </div>
-        <div className="tile">
-          <div className="label"><i className="key" style={{ background: "var(--series-no)" }} />NO price</div>
-          <div className="value">{cents(m.no.price)}</div>
-        </div>
-        <div className="tile">
-          <div className="label">1-day volatility (σ)</div>
-          <div className="value">{cents(m.yes.sigma1d)}</div>
-        </div>
-        <div className="tile">
-          <div className="label">Max leverage YES / NO</div>
-          <div className="value">
-            {lev(1 / (1 - m.yes.maxLtv))} / {lev(1 / (1 - m.no.maxLtv))}
-          </div>
-        </div>
-      </div>
-      <Why s={s} label={side} />
+      <h2>Price and leverage</h2>
       <MarketCharts history={history} />
+      <Why s={s} label={side} />
     </section>
   );
 }

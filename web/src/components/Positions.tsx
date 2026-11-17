@@ -46,7 +46,7 @@ export function Positions({ snap, onClose, onAddMargin }: Props) {
 
   return (
     <section className="card" aria-label="Your positions">
-      <h2>Your positions</h2>
+      <h2>Your positions{ps.length > 0 && <span className="count">{ps.length}</span>}</h2>
       {ps.length === 0 ? (
         <div className="empty">No open positions for this account.</div>
       ) : (

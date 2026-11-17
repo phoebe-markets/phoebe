@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useAccount, useConnect, useDisconnect, useSwitchChain } from "wagmi";
 import { getWalletClient } from "@wagmi/core";
 import { polygonAmoy } from "viem/chains";
@@ -19,12 +19,13 @@ import {
 } from "./chain";
 import { useProtocol } from "./store";
 import { addMargin, closePosition, deposit, explain, mintTestUsdc, openPosition, withdraw } from "./actions";
-import { MarketPanel } from "./components/MarketPanel";
+import { MarketBar, MarketPanel } from "./components/MarketPanel";
 import { TradePanel } from "./components/TradePanel";
 import { Positions } from "./components/Positions";
-import { LpPanel } from "./components/LpPanel";
+import { LpForm, PoolOverview } from "./components/LpPanel";
 import { ActivityFeed } from "./components/Activity";
 import { shortAddr, usd, when } from "./format";
+import { logoSvg } from "./brand/logo";
 
 type Theme = "system" | "dark" | "light";
 
@@ -113,6 +114,72 @@ function useWallet() {
   };
 }
 
+type Tab = "trade" | "lp";
+
+/** The open tab lives in the URL hash (#lp), so links can go straight to the liquidity page. */
+function useTab(): [Tab, (t: Tab) => void] {
+  const read = (): Tab => (location.hash === "#lp" ? "lp" : "trade");
+  const [tab, setTab] = useState<Tab>(read);
+  useEffect(() => {
+    const on = () => setTab(read());
+    addEventListener("hashchange", on);
+    return () => removeEventListener("hashchange", on);
+  }, []);
+  const go = (t: Tab) => {
+    history.replaceState(null, "", t === "lp" ? "#lp" : location.pathname + location.search);
+    setTab(t);
+    scrollTo({ top: 0 });
+  };
+  return [tab, go];
+}
+
+const THEME_NEXT: Record<Theme, Theme> = { system: "dark", dark: "light", light: "system" };
+const THEME_ICON: Record<Theme, React.ReactNode> = {
+  system: <path d="M12 3a9 9 0 1 0 0 18V3Z" fill="currentColor" />,
+  dark: <path d="M20 14.5A8 8 0 0 1 9.5 4a8 8 0 1 0 10.5 10.5Z" fill="currentColor" />,
+  light: (
+    <>
+      <circle cx="12" cy="12" r="4" fill="currentColor" />
+      <path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9 7 7M17 17l2.1 2.1M4.9 19.1 7 17M17 7l2.1-2.1" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
+    </>
+  ),
+};
+
+function ThemeToggle({ theme, setTheme }: { theme: Theme; setTheme: (t: Theme) => void }) {
+  return (
+    <button className="icon-btn" title={`Theme: ${theme} (click for ${THEME_NEXT[theme]})`} aria-label={`Theme: ${theme}`}
+      onClick={() => setTheme(THEME_NEXT[theme])}>
+      <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden>
+        {theme === "system" && <circle cx="12" cy="12" r="9" fill="none" stroke="currentColor" strokeWidth="1.8" />}
+        {THEME_ICON[theme]}
+      </svg>
+    </button>
+  );
+}
+
+/** A button that opens a small menu; closes on outside click or Escape. */
+function Menu({ label, className, children }: { label: React.ReactNode; className?: string; children: (close: () => void) => React.ReactNode }) {
+  const [open, setOpen] = useState(false);
+  const ref = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (!open) return;
+    const away = (e: MouseEvent) => ref.current && !ref.current.contains(e.target as Node) && setOpen(false);
+    const esc = (e: KeyboardEvent) => e.key === "Escape" && setOpen(false);
+    addEventListener("mousedown", away);
+    addEventListener("keydown", esc);
+    return () => {
+      removeEventListener("mousedown", away);
+      removeEventListener("keydown", esc);
+    };
+  }, [open]);
+  return (
+    <div className="menu" ref={ref}>
+      <button className={className} aria-haspopup="menu" aria-expanded={open} onClick={() => setOpen((o) => !o)}>{label}</button>
+      {open && <div className="menu-pop" role="menu">{children(() => setOpen(false))}</div>}
+    </div>
+  );
+}
+
 export function App() {
   const [proto, setProto] = useState<{ d: Deployment; abi: Abis } | null>(null);
   const [loadErr, setLoadErr] = useState<string | null>(null);
@@ -122,6 +189,7 @@ export function App() {
   const [faucetMsg, setFaucetMsg] = useState<string | null>(null);
   const [side, setSide] = useState<"YES" | "NO">("YES");
   const [theme, setTheme] = useTheme();
+  const [tab, setTab] = useTab();
 
   useEffect(() => {
     loadProtocol().then(setProto, (e) => setLoadErr((e as Error).message));
@@ -129,25 +197,40 @@ export function App() {
 
   const { snap, error, refreshNow } = useProtocol(proto?.d ?? null, proto?.abi ?? null, address);
 
+  const brand = (
+    <a className="brand" href="/" title="Phoebe home">
+      <span className="brand-mark" dangerouslySetInnerHTML={{ __html: logoSvg("app") }} />
+    </a>
+  );
+
   if (loadErr) {
     return (
-      <div className="app">
-        <div className="banner">
-          Couldn't load the protocol on {CFG.label}: {loadErr}.{" "}
-          {NET === "local" ? (
-            <>Start a local chain with <code>demo/replay.sh</code>, then reload, or <a href="?net=amoy">open the Amoy testnet</a>.</>
-          ) : (
-            <>Check the RPC, or <a href="?net=local">open a local replay</a>.</>
-          )}
-        </div>
-      </div>
+      <>
+        <header className="topbar"><div className="topbar-inner">{brand}</div></header>
+        <main className="app">
+          <div className="banner">
+            Couldn't load the protocol on {CFG.label}: {loadErr}.{" "}
+            {NET === "local" ? (
+              <>Start a local chain with <code>demo/replay.sh</code>, then reload, or <a href="?net=amoy">open the Amoy testnet</a>.</>
+            ) : (
+              <>Check the RPC, or <a href="?net=local">open a local replay</a>.</>
+            )}
+          </div>
+        </main>
+      </>
     );
   }
   if (!proto || !snap) {
     return (
-      <div className="app">
-        <div className="empty">{error ? `Waiting for the chain: ${error}` : "Loading…"}</div>
-      </div>
+      <>
+        <header className="topbar"><div className="topbar-inner">{brand}</div></header>
+        <main className="app">
+          <div className="loading">
+            <span className="spinner" aria-hidden />
+            {error ? `Waiting for the chain: ${error}` : `Connecting to ${CFG.label}…`}
+          </div>
+        </main>
+      </>
     );
   }
 
@@ -163,98 +246,111 @@ export function App() {
     }
   };
   const m = snap.markets[Math.min(marketIdx, snap.markets.length - 1)];
+  const faucet = () => {
+    setFaucetMsg("Minting 10,000 test USDC…");
+    act((w: Wallet) => mintTestUsdc(w, d, abi))().then(
+      () => setFaucetMsg(null),
+      (e) => setFaucetMsg((e as Error).message),
+    );
+  };
 
-  return (
-    <div className="app">
-      <header className="header">
-        <div className="brand">
-          Phoebe<small>leverage on prediction markets</small>
-        </div>
-        {snap.markets.length > 1 && (
-          <select aria-label="Market" value={marketIdx} onChange={(e) => setMarketIdx(Number(e.target.value))} style={{ width: "auto" }}>
-            {snap.markets.map((mk) => (
-              <option key={mk.index} value={mk.index}>{mk.name}</option>
-            ))}
-          </select>
-        )}
-        <span className="spacer" />
-        <select aria-label="Network" value={NET} onChange={(e) => switchNet(e.target.value as Net)} style={{ width: "auto" }}>
-          {(Object.keys(NETWORKS) as Net[]).map((n) => (
-            <option key={n} value={n}>{NETWORKS[n].label}</option>
-          ))}
-        </select>
-        <span className="chip" title="Chain time (replays run on historical time)">⏱ {when(snap.chainTime)} UTC</span>
-        <span className="chip">block {String(snap.block)}</span>
-        {CFG.wallet === "demo" ? (
-          <select aria-label="Account" value={w.demoIdx} onChange={(e) => w.setDemoIdx(Number(e.target.value))} style={{ width: "auto" }}>
-            {DEMO_ACCOUNTS.map((a, i) => (
-              <option key={a.label} value={i}>{a.label} · {shortAddr(demoWallet(a.pk).account.address)}</option>
-            ))}
-          </select>
-        ) : address ? (
+  const wallet =
+    CFG.wallet === "demo" ? (
+      <select className="pill-select" aria-label="Account" value={w.demoIdx} onChange={(e) => w.setDemoIdx(Number(e.target.value))}>
+        {DEMO_ACCOUNTS.map((a, i) => (
+          <option key={a.label} value={i}>{a.label} · {shortAddr(demoWallet(a.pk).account.address)}</option>
+        ))}
+      </select>
+    ) : address ? (
+      <Menu className="wallet-btn" label={<><span className="dot" aria-hidden />{shortAddr(address)}</>}>
+        {(close) => (
           <>
-            <a className="chip" href={`${CFG.explorer}/address/${address}`} target="_blank" rel="noreferrer">
-              {shortAddr(address)} · via {w.walletName}
-            </a>
-            <button className="btn ghost" onClick={w.disconnect}>Disconnect</button>
+            <div className="menu-note">Connected via {w.walletName}</div>
+            <div className="menu-note mono">{usd(snap.account.usdc)} USDC</div>
+            <button role="menuitem" onClick={() => { close(); faucet(); }}>Get 10k test USDC</button>
+            {CFG.explorer && (
+              <a role="menuitem" href={`${CFG.explorer}/address/${address}`} target="_blank" rel="noreferrer" onClick={close}>View on explorer ↗</a>
+            )}
+            <button role="menuitem" onClick={() => { close(); w.disconnect(); }}>Disconnect</button>
           </>
-        ) : w.wallets.length === 0 ? (
-          <span className="chip">No browser wallet found: install MetaMask or Rabby</span>
-        ) : (
+        )}
+      </Menu>
+    ) : w.wallets.length === 0 ? (
+      <span className="chip">No browser wallet: install MetaMask or Rabby</span>
+    ) : (
+      <Menu className="btn wallet-connect" label={w.connecting ? "Connecting…" : "Connect wallet"}>
+        {(close) =>
           w.wallets.map((c) => (
-            <button key={c.uid} className="btn" style={{ width: "auto", padding: "6px 14px" }} disabled={w.connecting}
-              onClick={() => w.connect(c.id)}>
-              {w.connecting ? "Connecting…" : `Connect ${c.name === "Injected" ? "wallet" : c.name}${NON_EVM_HINT.test(c.name) ? " (may not support Amoy)" : ""}`}
+            <button key={c.uid} role="menuitem" disabled={w.connecting} onClick={() => { close(); w.connect(c.id); }}>
+              {c.name === "Injected" ? "Browser wallet" : c.name}
+              {NON_EVM_HINT.test(c.name) && <small> may not support Amoy</small>}
             </button>
           ))
-        )}
-        {address && <span className="chip">{usd(snap.account.usdc)} USDC</span>}
-        {CFG.wallet === "injected" && address && (
-          <button className="btn ghost" title="The testnet USDC is a freely mintable mock"
-            onClick={() => {
-              setFaucetMsg("Minting…");
-              act((w: Wallet) => mintTestUsdc(w, d, abi))().then(
-                () => setFaucetMsg(null),
-                (e) => setFaucetMsg((e as Error).message),
-              );
-            }}>
-            Get 10k test USDC
-          </button>
-        )}
-        <select aria-label="Theme" value={theme} onChange={(e) => setTheme(e.target.value as Theme)} style={{ width: "auto" }}>
-          <option value="system">System</option>
-          <option value="dark">Dark</option>
-          <option value="light">Light</option>
-        </select>
+        }
+      </Menu>
+    );
+
+  return (
+    <>
+      <header className="topbar">
+        <div className="topbar-inner">
+          {brand}
+          <nav className="tabs" aria-label="Sections">
+            <button aria-current={tab === "trade" ? "page" : undefined} onClick={() => setTab("trade")}>Trade</button>
+            <button aria-current={tab === "lp" ? "page" : undefined} onClick={() => setTab("lp")}>Provide liquidity</button>
+          </nav>
+          <span className="spacer" />
+          <span className="chip chain-chip" title="Chain time (replays run on historical time) and block">
+            {when(snap.chainTime)} UTC · #{String(snap.block)}
+          </span>
+          <select className="pill-select" aria-label="Network" value={NET} onChange={(e) => switchNet(e.target.value as Net)}>
+            {(Object.keys(NETWORKS) as Net[]).map((n) => (
+              <option key={n} value={n}>{NETWORKS[n].label}</option>
+            ))}
+          </select>
+          {address && CFG.wallet === "demo" && <span className="chip">{usd(snap.account.usdc)} USDC</span>}
+          {wallet}
+          <ThemeToggle theme={theme} setTheme={setTheme} />
+        </div>
       </header>
 
-      {error && <div className="banner">Chain read failed, showing the last good state: {error}</div>}
-      {w.walletErr && <div className="banner">{w.walletErr}</div>}
-      {w.wrongChain && <div className="banner">Your wallet is on another network; Phoebe will ask it to switch to Polygon Amoy when you transact.</div>}
-      {faucetMsg && <div className="banner">{faucetMsg}</div>}
-      {NET === "amoy" && (
-        <div className="sub">
-          Live on Polygon Amoy: prices stream from Polymarket via the keeper; fills come from the keeper's inventory at oracle ±0.5%.
-          Testnet funds only. Need gas? Get Amoy POL from a faucet.
-        </div>
-      )}
+      <main className="app">
+        {error && <div className="banner">Chain read failed, showing the last good state: {error}</div>}
+        {w.walletErr && <div className="banner">{w.walletErr}</div>}
+        {w.wrongChain && <div className="banner">Your wallet is on another network; Phoebe will ask it to switch to Polygon Amoy when you transact.</div>}
+        {faucetMsg && <div className="banner">{faucetMsg}</div>}
 
-      <div className="grid-main">
-        <MarketPanel m={m} history={snap.history[m.index] ?? []} side={side} chainTime={snap.chainTime} />
-        <TradePanel key={`trade-${address}`} m={m} snap={snap} side={side} setSide={setSide}
-          onOpen={act((w: Wallet, tokenId: bigint, margin: number, borrow: number) => openPosition(w, d, abi, tokenId, margin, borrow))} />
-      </div>
+        {tab === "trade" ? (
+          <>
+            <MarketBar m={m} markets={snap.markets} onPick={setMarketIdx} chainTime={snap.chainTime} />
+            <div className="grid-main">
+              <MarketPanel m={m} history={snap.history[m.index] ?? []} side={side} />
+              <TradePanel key={`trade-${address}`} m={m} snap={snap} side={side} setSide={setSide}
+                onOpen={act((w: Wallet, tokenId: bigint, margin: number, borrow: number) => openPosition(w, d, abi, tokenId, margin, borrow))} />
+            </div>
+            <Positions key={`pos-${address}`} snap={snap}
+              onClose={act((w: Wallet, id: bigint) => closePosition(w, d, abi, id))}
+              onAddMargin={act((w: Wallet, id: bigint, amount: number) => addMargin(w, d, abi, id, amount))} />
+            <ActivityFeed items={snap.activity} />
+          </>
+        ) : (
+          <>
+            <div className="grid-main">
+              <PoolOverview snap={snap} d={d} />
+              <LpForm key={`lp-${address}`} snap={snap}
+                onDeposit={act((w: Wallet, t: "senior" | "junior", amount: number) => deposit(w, d, abi, t, amount))}
+                onWithdraw={act((w: Wallet, t: "senior" | "junior", amount: number) => withdraw(w, d, abi, t, amount))} />
+            </div>
+            <ActivityFeed items={snap.activity} />
+          </>
+        )}
 
-      <Positions key={`pos-${address}`} snap={snap}
-        onClose={act((w: Wallet, id: bigint) => closePosition(w, d, abi, id))}
-        onAddMargin={act((w: Wallet, id: bigint, amount: number) => addMargin(w, d, abi, id, amount))} />
-
-      <div className="grid-2">
-        <LpPanel key={`lp-${address}`} snap={snap} d={d}
-          onDeposit={act((w: Wallet, t: "senior" | "junior", amount: number) => deposit(w, d, abi, t, amount))}
-          onWithdraw={act((w: Wallet, t: "senior" | "junior", amount: number) => withdraw(w, d, abi, t, amount))} />
-        <ActivityFeed items={snap.activity} />
-      </div>
-    </div>
+        <footer className="app-foot">
+          {NET === "amoy"
+            ? "Live on Polygon Amoy: prices stream from Polymarket via the keeper; fills come from the keeper's inventory at oracle ±0.5%. Testnet funds only. Need gas? Get Amoy POL from a faucet."
+            : "Local replay: a historical Polymarket market replayed on an Anvil chain, on historical time."}
+        </footer>
+      </main>
+    </>
   );
 }

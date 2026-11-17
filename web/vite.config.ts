@@ -61,4 +61,13 @@ function protocolFiles(): Plugin {
   };
 }
 
-export default defineConfig({ plugins: [react(), protocolFiles()], server: { port: 5173 } });
+// Two pages: the landing page at / and the trading app at /app/
+export default defineConfig({
+  plugins: [react(), protocolFiles()],
+  server: { port: 5173 },
+  build: {
+    rollupOptions: {
+      input: { landing: resolve(__dirname, "index.html"), app: resolve(__dirname, "app/index.html") },
+    },
+  },
+});

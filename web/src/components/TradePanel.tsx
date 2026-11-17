@@ -53,8 +53,8 @@ export function TradePanel({ m, snap, side, setSide, onOpen }: Props) {
   }
 
   return (
-    <section className="card" aria-label="Open a position">
-      <h2>Trade</h2>
+    <section className="card sticky" aria-label="Open a position">
+      <h2>Open a position</h2>
       <div className="seg" role="group" aria-label="Side">
         <button aria-pressed={side === "YES"} onClick={() => setSide("YES")}>
           <i className="key" style={{ background: "var(--series-yes)" }} />
@@ -71,7 +71,13 @@ export function TradePanel({ m, snap, side, setSide, onOpen }: Props) {
           <span>Margin (USDC)</span>
           <span>Balance {usd(snap.account.usdc)}</span>
         </label>
-        <input id="margin" type="number" min={0} step={100} value={margin} onChange={(e) => setMargin(Math.max(0, Number(e.target.value)))} />
+        <div className="input-max">
+          <input id="margin" type="number" min={0} step={100} value={margin} onChange={(e) => setMargin(Math.max(0, Number(e.target.value)))} />
+          <button type="button" disabled={snap.account.usdc <= 0}
+            onClick={() => setMargin(Math.floor(snap.account.usdc / (1 + ((levX - 1) * snap.fees.openFeeBps) / 10_000)))}>
+            Max
+          </button>
+        </div>
       </div>
 
       <div className="field">

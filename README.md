@@ -43,7 +43,7 @@ REPLAY=biden-nominee forge test --mc Replay -vv
 cd keeper && bun install && cd ..
 demo/replay.sh sim/data/biden-nominee.json -- --speed 20 --traders 12
 
-# UI (in another terminal): http://localhost:5173
+# UI (in another terminal): http://localhost:5173 (landing page), http://localhost:5173/app/ (trading app)
 cd web && bun install && bunx vite
 ```
 

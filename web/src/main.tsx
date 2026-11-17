@@ -4,6 +4,8 @@ import { WagmiProvider } from "wagmi";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { App } from "./App";
 import { wagmiConfig } from "./wagmi";
+import { mountStars } from "./brand/stars";
+import "./brand/tokens.css";
 import "./styles.css";
 
 const queryClient = new QueryClient();
@@ -29,6 +31,13 @@ class ErrorBoundary extends Component<{ children: ReactNode }, { error: Error | 
     );
   }
 }
+
+// the night sky behind the app (hidden by CSS on the light theme); a little dimmer than the landing page
+const sky = document.createElement("canvas");
+sky.className = "stars";
+sky.setAttribute("aria-hidden", "true");
+document.body.prepend(sky);
+mountStars(sky, { brightness: 0.75, density: 0.8 });
 
 createRoot(document.getElementById("root")!).render(
   <StrictMode>
