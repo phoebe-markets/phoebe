@@ -61,6 +61,9 @@ contract Replay is Test, ERC1155Holder {
         bool absorb; // underwater positions go to backstop inventory instead of being fire-sold
         uint256 invHold; // keeper sells each absorbed lot this long after absorbing (0 = hold to resolution)
         uint256 clusterCapBps; // multi-market files: cap on total debt across all markets, bps of LP. 0 = none
+        uint256 maxPosDvBps; // per-position borrow cap, bps of the market's daily volume. 0 = none
+        uint256 bonusRamp; // Dutch-auction liquidation bonus: bps per hour since flagged. 0 = fixed bonus
+        uint256 bonusMax;
     }
 
     struct World {
@@ -89,6 +92,8 @@ contract Replay is Test, ERC1155Holder {
         uint256 absorbed; // count
         uint256 absorbedDebt; // written off at absorb time
         uint256 recovered; // inventory sale proceeds
+        // liquidator memo: (market price, bonus) at the last unprofitable attempt; retry once either changes
+        mapping(uint256 => uint256) failedAtPx;
         uint256[] lotToken;
         uint256[] lotShares;
         uint256[] lotAt;
@@ -152,7 +157,10 @@ contract Replay is Test, ERC1155Holder {
             capDvBps: vm.envOr("CAP_DV", uint256(0)),
             absorb: vm.envOr("ABSORB", false),
             invHold: vm.envOr("INV_HOLD", uint256(0)),
-            clusterCapBps: vm.envOr("CLUSTER_CAP", uint256(0))
+            clusterCapBps: vm.envOr("CLUSTER_CAP", uint256(0)),
+            maxPosDvBps: vm.envOr("MAX_POS_DV", uint256(0)),
+            bonusRamp: vm.envOr("BONUS_RAMP", uint256(0)),
+            bonusMax: vm.envOr("BONUS_MAX", uint256(1_500))
         });
     }
 
@@ -333,6 +341,11 @@ contract Replay is Test, ERC1155Holder {
             w.risk.listMarket(2 * i + 1, m);
             w.risk.listMarket(2 * i + 2, m);
             (all[2 * i], all[2 * i + 1]) = (2 * i + 1, 2 * i + 2);
+            if (smart && cfg.maxPosDvBps > 0 && dvOf[i] > 0) {
+                uint256[] memory pair = new uint256[](2);
+                (pair[0], pair[1]) = (2 * i + 1, 2 * i + 2);
+                w.risk.setMaxPositionBorrow(pair, dvOf[i] * cfg.maxPosDvBps / 10_000);
+            }
         }
         if (smart && cfg.clusterCapBps > 0) {
             w.risk.setCluster(all, 1);
@@ -344,6 +357,7 @@ contract Replay is Test, ERC1155Holder {
         if (smart) {
             w.pm.setFees(cfg.openFeeBps, cfg.liqFeeBps);
             w.pm.setAbsorbUnderwater(cfg.absorb);
+            if (cfg.bonusRamp > 0) w.pm.setBonusRamp(cfg.bonusRamp, cfg.bonusMax);
             w.pool.setRateParams(cfg.baseRate, cfg.slope1, 0.8e18, 1.5e18);
         }
         w.pool.setManager(address(w.pm));
@@ -375,14 +389,21 @@ contract Replay is Test, ERC1155Holder {
         // LTV = B / ((M + B) * fill), fill ~= 1 - spread  =>  B = M * L * f / (1 - L * f)
         uint256 target = maxLtv * cfg.targetBps / 10_000;
         uint256 fill = 9_950;
-        uint256 borrow = cfg.margin * target * fill / (10_000 * 10_000 - target * fill);
+        uint256 margin = cfg.margin;
+        uint256 borrow = margin * target * fill / (10_000 * 10_000 - target * fill);
+        // over the per-position cap: the trader shrinks the whole position (same leverage, smaller size)
+        uint256 cap = w.risk.maxPositionBorrow(side);
+        if (cap > 0 && borrow > cap) {
+            margin = margin * cap / borrow;
+            borrow = cap;
+        }
 
-        try w.pm.open(side, cfg.margin, borrow, 0) returns (uint256 id) {
+        try w.pm.open(side, margin, borrow, 0) returns (uint256 id) {
             w.openFees += borrow * w.pm.openFeeBps() / 10_000;
             w.open.push(id);
             w.openedAt.push(block.timestamp);
             w.opened++;
-            w.volume += cfg.margin + borrow;
+            w.volume += margin + borrow;
         } catch {
             w.skipped++;
         }
@@ -410,13 +431,19 @@ contract Replay is Test, ERC1155Holder {
         for (uint256 k = w.open.length; k > 0; --k) {
             uint256 j = k - 1;
             PositionManager.Health memory h = w.pm.health(w.open[j]);
-            if (h.liquidatable && _liquidateOne(w, w.open[j], h)) _remove(w, j);
+            if (!h.liquidatable) continue;
+            if (cfg.bonusRamp > 0) w.pm.flag(w.open[j]); // start the auction clock
+            if (_liquidateOne(w, w.open[j], h)) _remove(w, j);
         }
     }
 
     /// @return done Position is gone (liquidated or absorbed).
     function _liquidateOne(World storage w, uint256 id, PositionManager.Health memory h) internal returns (bool) {
         (, uint256 tokenId,,) = w.pm.positions(id);
+        (uint256 mkt,) = market.getPrice(tokenId);
+        uint256 memo = uint256(keccak256(abi.encode(mkt, w.pm.currentBonusBps(id))));
+        if (w.failedAtPx[id] == memo) return false; // unprofitable at this price and bonus last time
+
         uint256 snap = vm.snapshotState();
         uint256 paid;
         uint256 seized;
@@ -435,11 +462,11 @@ contract Replay is Test, ERC1155Holder {
             return true;
         }
         // A rational liquidator only acts if the seized shares, sold at the *market* price after impact, cover what it pays.
-        (uint256 mkt,) = market.getPrice(tokenId);
         uint256 seizedValue = seized * mkt / 1e18;
         if (seizedValue - seizedValue * _slipBps(tokenId, seizedValue) / 10_000 < paid) {
             vm.revertToStateAndDelete(snap);
             w.unprofitableLiqs++;
+            w.failedAtPx[id] = memo;
             return false;
         }
         vm.deleteStateSnapshot(snap);

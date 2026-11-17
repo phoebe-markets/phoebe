@@ -22,6 +22,8 @@ bot sweeps every tick and only liquidates when it's profitable at the *market* p
 | Liquidation split | 3% bonus to the liquidator + 2% fee to junior (same 5% total cost to traders) | funds the insurance buffer from the liquidation flow |
 | Opening fee | 0.3% of borrowed, to junior | charges for the jump risk that remains |
 | **Absorb + 6h cool-off** | underwater positions aren't fire-sold: debt is written off against junior, the shares go to backstop inventory, and a keeper sells them 6h later (or at resolution) | fire-sales into crashed books; one-tick spikes |
+| **Dutch-auction liquidation bonus** | starts at 3% and grows 1%/hour once a position is flagged liquidatable, up to 15% | thin books where a fixed bonus doesn't cover a liquidator's slippage |
+| **Per-position borrow cap** | ≤ 3% of the market's daily volume | keeps every position small enough to liquidate profitably |
 | Cluster caps | available, but set loosely (≥25% of the pool per cluster) | correlated markets in a shared pool. The backtest shows they cost volume without reducing tail losses (see below) |
 
 ## Round 2: liquidity, absorb, correlated markets
@@ -92,6 +94,48 @@ the worst single market is −$3.5k (1.75% of that pool's junior tranche), and s
 - With lazy traders, 40%+ of positions get liquidated; with attentive traders, 17–18%. The full strategy is
   profitable under both, and doesn't depend on traders getting liquidated: on the holdout with
   attentive traders, revenue is $155k opening fees + about $105k liquidation fees + interest.
+
+## Round 3: stress test, and the gap it found
+
+**Stress:** 4× trader flow ($20k margin per position) on the shared-pool clusters, pushing utilization to the
+junior-coverage limit (~90%).
+- *Attentive traders:* LPs +$2.45M, worst cluster −$11.7k, senior never impaired. Correlation is still not the
+  binding risk.
+- *Lazy traders* broke it: on 23 clusters, credit loss was $1.15M, and the Romania election cluster lost $367k,
+  more than its whole junior tranche. **Senior was impaired.**
+
+**Cause:** position size vs liquidity, not a jump. $60k positions in markets trading $260–420k/day cost
+11–14% to liquidate under the impact model, far above the 3% bonus. Liquidators passed (8,092 unprofitable
+attempts), positions drifted underwater as the result became clear, and the protocol absorbed $877k of debt
+into a book that kept falling. Even capping position size at 1% of daily volume wasn't enough: a $2.7k sale
+still costs about 3.2%, more than the 3% bonus.
+
+**Fix:** a Dutch-auction liquidation bonus (the discount grows until someone takes the position) plus a
+per-position borrow cap.
+
+| Romania cluster, lazy traders, 4× flow | LP PnL | Credit loss | Absorbed | Trader liq. penalties |
+|---|---|---|---|---|
+| Fixed 3% bonus | −367k | 583k | 49 | 14k |
+| + position cap 1% of daily volume | −118k | 133k | 54 | 4k |
+| **Auction bonus** (+1%/h, max 15%) | **+158k** | 102k | 14 | 270k |
+| Auction + cap 3% | +67k | 20k | 12 | 155k |
+| Auction + cap 1% | +32k | **0** | **0** | 36k |
+
+**Full stress rerun with the fix** (lazy traders, 4× flow, all shared-pool clusters):
+
+| | Fixed 3% bonus | **Auction + 3% cap** |
+|---|---|---|
+| Credit loss (24 comparable clusters) | 1.18M | **266k** |
+| Worst cluster | −367k (Romania) | −97k (Fed chair, 49% of its junior) |
+| Clusters with senior impaired | 9 | **0** |
+| LP PnL, all 25 clusters | — | +2.03M |
+| Share of positions liquidated / trader liq. penalties | 13% / 0.3M | 38% / 3.4M |
+
+Lazy traders now pay for leaving oversized positions in thin markets. The LPs don't.
+
+On the train and holdout sets the auction changes nothing, because attentive traders exit before the clock
+runs: it costs nothing where it isn't needed. The 3% cap costs about 10% of holdout volume (LP PnL
++218k → +197k). Adopted: **auction + 3% cap.**
 
 ## Known limits of the backtest
 

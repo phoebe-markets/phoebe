@@ -56,7 +56,12 @@ contract PositionManager is ERC1155Holder, Ownable, ReentrancyGuard {
     IPriceOracle public oracle;
     IExecutionVenue public venue;
 
-    uint256 public liquidationBonusBps = 500; // to the liquidator
+    uint256 public liquidationBonusBps = 500; // to the liquidator (starting bonus)
+    /// @notice Dutch-auction bonus: once flagged liquidatable, the bonus grows by this much per hour up to the max,
+    ///         so liquidations clear at whatever discount the market's depth requires. 0 = fixed bonus.
+    uint256 public bonusRampBpsPerHour;
+    uint256 public maxLiquidationBonusBps = 500;
+    mapping(uint256 => uint256) public liquidatableSince;
     uint256 public liquidationFeeBps; // to the pool (junior), on top of the bonus
     uint256 public openFeeBps; // of the borrowed amount, to the pool (junior)
     uint256 public maxPriceAge = 10 minutes;
@@ -91,6 +96,7 @@ contract PositionManager is ERC1155Holder, Ownable, ReentrancyGuard {
         uint256 sharesToOwner,
         uint256 badDebt
     );
+    event Flagged(uint256 indexed id, uint256 since);
     event SharesClaimed(address indexed owner, uint256 indexed tokenId, uint256 shares);
     event Absorbed(uint256 indexed id, uint256 indexed tokenId, uint256 debt, uint256 shares, uint256 markValue);
     event InventorySold(uint256 indexed tokenId, uint256 shares, uint256 proceeds);
@@ -101,6 +107,7 @@ contract PositionManager is ERC1155Holder, Ownable, ReentrancyGuard {
     error LtvTooHigh();
     error BorrowCapExceeded();
     error ClusterCapExceeded();
+    error PositionTooLarge();
     error Underwater();
     error Healthy();
     error NoPosition();
@@ -139,6 +146,12 @@ contract PositionManager is ERC1155Holder, Ownable, ReentrancyGuard {
     function setParams(uint256 _liquidationBonusBps, uint256 _maxPriceAge) external onlyOwner {
         require(_liquidationBonusBps <= 2_000, "bonus");
         (liquidationBonusBps, maxPriceAge) = (_liquidationBonusBps, _maxPriceAge);
+        if (maxLiquidationBonusBps < _liquidationBonusBps) maxLiquidationBonusBps = _liquidationBonusBps;
+    }
+
+    function setBonusRamp(uint256 rampBpsPerHour, uint256 maxBonusBps) external onlyOwner {
+        require(maxBonusBps >= liquidationBonusBps && maxBonusBps <= 2_500, "bonus");
+        (bonusRampBpsPerHour, maxLiquidationBonusBps) = (rampBpsPerHour, maxBonusBps);
     }
 
     function setAbsorbUnderwater(bool on) external onlyOwner {
@@ -181,6 +194,9 @@ contract PositionManager is ERC1155Holder, Ownable, ReentrancyGuard {
             usdc.forceApprove(address(pool), fee);
             pool.donate(fee);
         }
+
+        uint256 maxBorrow = risk.maxPositionBorrow(tokenId);
+        if (maxBorrow != 0 && borrowAmount > maxBorrow) revert PositionTooLarge();
 
         uint256 scaled;
         if (borrowAmount > 0) {
@@ -261,6 +277,29 @@ contract PositionManager is ERC1155Holder, Ownable, ReentrancyGuard {
 
     // ------------------------------------------------------------------ liquidation
 
+    /// @notice Start (or reset) a position's liquidation auction clock. Permissionless: keepers call it as soon as a
+    ///         position is liquidatable, and anyone can clear the flag once the position is healthy again.
+    function flag(uint256 id) external {
+        Position memory p = positions[id];
+        if (p.owner == address(0)) revert NoPosition();
+        bool liq = _health(p, pool.currentBorrowIndex()).liquidatable;
+        if (liq && liquidatableSince[id] == 0) {
+            liquidatableSince[id] = block.timestamp;
+            emit Flagged(id, block.timestamp);
+        } else if (!liq && liquidatableSince[id] != 0) {
+            delete liquidatableSince[id];
+            emit Flagged(id, 0);
+        }
+    }
+
+    /// @notice Current liquidator bonus for a position (bps): the start bonus, plus the ramp since it was flagged.
+    function currentBonusBps(uint256 id) public view returns (uint256) {
+        uint256 since = liquidatableSince[id];
+        if (since == 0 || bonusRampBpsPerHour == 0) return liquidationBonusBps;
+        uint256 b = liquidationBonusBps + (block.timestamp - since) * bonusRampBpsPerHour / 1 hours;
+        return b > maxLiquidationBonusBps ? maxLiquidationBonusBps : b;
+    }
+
     /// @notice Full liquidation. The caller pays USDC and receives shares at a discount.
     /// @param maxPay Most USDC the caller is willing to pay (front-running guard).
     function liquidate(uint256 id, uint256 maxPay) external nonReentrant returns (uint256 paid, uint256 seized) {
@@ -272,7 +311,8 @@ contract PositionManager is ERC1155Holder, Ownable, ReentrancyGuard {
         if (!h.liquidatable) revert Healthy();
 
         // Shares the debt (plus protocol fee) buys at the discounted (bonus) price.
-        uint256 premium = liquidationBonusBps + liquidationFeeBps;
+        uint256 bonus = currentBonusBps(id);
+        uint256 premium = bonus + liquidationFeeBps;
         uint256 sharesForDebt =
             h.priceWad == 0 ? type(uint256).max : h.debt.mulDiv((BPS + premium) * WAD, BPS * h.priceWad);
 
@@ -288,7 +328,7 @@ contract PositionManager is ERC1155Holder, Ownable, ReentrancyGuard {
             if (absorbUnderwater) revert UseAbsorb();
             // Underwater: everything recovered goes to the debt, no protocol fee.
             seized = p.shares;
-            paid = h.value.mulDiv(BPS, BPS + liquidationBonusBps);
+            paid = h.value.mulDiv(BPS, BPS + bonus);
             if (paid > h.debt) paid = h.debt; // collateral covers debt but not debt+fee+bonus
             badDebt = h.debt - paid;
         }
@@ -320,7 +360,7 @@ contract PositionManager is ERC1155Holder, Ownable, ReentrancyGuard {
 
         Health memory h = _health(p, pool.borrowIndex());
         if (!h.liquidatable) revert Healthy();
-        uint256 premium = liquidationBonusBps + liquidationFeeBps;
+        uint256 premium = currentBonusBps(id) + liquidationFeeBps;
         if (h.priceWad > 0 && h.debt.mulDiv((BPS + premium) * WAD, BPS * h.priceWad) <= p.shares) revert NotUnderwater();
 
         _clear(id, p);
@@ -389,5 +429,6 @@ contract PositionManager is ERC1155Holder, Ownable, ReentrancyGuard {
         uint32 c = risk.clusterOf(p.tokenId);
         if (c != 0) clusterScaledDebt[c] -= p.scaledDebt;
         delete positions[id];
+        delete liquidatableSince[id];
     }
 }

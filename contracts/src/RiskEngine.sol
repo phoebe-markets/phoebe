@@ -48,6 +48,9 @@ contract RiskEngine is Ownable {
     ///         cluster-wide borrow cap, so one news event can't hit more than a bounded slice of the pool.
     mapping(uint256 => uint32) public clusterOf; // tokenId => cluster (0 = none)
     mapping(uint32 => uint256) public clusterCap; // USDC
+    /// @notice Max borrow per position (USDC, 0 = unlimited). Size positions so a liquidation stays profitable after
+    ///         price impact: in thin books, liquidators won't take positions that are big relative to daily volume.
+    mapping(uint256 => uint256) public maxPositionBorrow;
     PriceBands public bands;
     mapping(address => bool) public guardians;
 
@@ -66,6 +69,7 @@ contract RiskEngine is Ownable {
     event JumpAllowanceSet(uint64 jumpWad);
     event ClusterSet(uint256 indexed tokenId, uint32 indexed cluster);
     event ClusterCapSet(uint32 indexed cluster, uint256 cap);
+    event MaxPositionBorrowSet(uint256 indexed tokenId, uint256 amount);
 
     error BadConfig();
     error NotGuardian();
@@ -105,6 +109,13 @@ contract RiskEngine is Ownable {
         for (uint256 i; i < tokenIds.length; ++i) {
             clusterOf[tokenIds[i]] = cluster;
             emit ClusterSet(tokenIds[i], cluster);
+        }
+    }
+
+    function setMaxPositionBorrow(uint256[] calldata tokenIds, uint256 amount) external onlyOwner {
+        for (uint256 i; i < tokenIds.length; ++i) {
+            maxPositionBorrow[tokenIds[i]] = amount;
+            emit MaxPositionBorrowSet(tokenIds[i], amount);
         }
     }
 
