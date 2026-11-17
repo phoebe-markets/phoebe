@@ -30,7 +30,9 @@ The result to look for is "RESULT: the CLOB ACCEPTED / did NOT accept ...", plus
 **Testnet note:** Polymarket's contracts exist on Amoy at the same addresses, but its staging CLOB
 (clob-staging.polymarket.com) isn't publicly reachable, so the API question can only be answered on mainnet.
 
-### Original investigation The contracts reach the market through the
+### Original investigation
+
+The contracts reach the market through the
 `IExecutionVenue` interface (`contracts/src/interfaces/IExecutionVenue.sol`). Whichever path we
 pick, only a new venue adapter is needed.
 
