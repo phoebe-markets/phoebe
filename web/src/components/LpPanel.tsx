@@ -1,14 +1,16 @@
 import { useState } from "react";
 import type { Snapshot } from "../store";
+import { CFG, type Deployment } from "../chain";
 import { pct, usd, usdCompact } from "../format";
 
 type Props = {
   snap: Snapshot;
+  d: Deployment;
   onDeposit: (t: "senior" | "junior", amount: number) => Promise<void>;
   onWithdraw: (t: "senior" | "junior", amount: number) => Promise<void>;
 };
 
-export function LpPanel({ snap, onDeposit, onWithdraw }: Props) {
+export function LpPanel({ snap, d, onDeposit, onWithdraw }: Props) {
   const p = snap.pool;
   const [tranche, setTranche] = useState<"senior" | "junior">("junior");
   const [amount, setAmount] = useState(10_000);
@@ -39,12 +41,12 @@ export function LpPanel({ snap, onDeposit, onWithdraw }: Props) {
         <div className="tile">
           <div className="label">Senior tranche</div>
           <div className="value">{usdCompact(p.senior)}</div>
-          <div className="sub">steady yield, protected</div>
+          <div className="sub">{pct(p.seniorApr, 2)} APR · share {p.seniorSharePrice.toFixed(4)}</div>
         </div>
         <div className="tile">
-          <div className="label">Junior tranche</div>
+          <div className="label">Junior tranche (first loss)</div>
           <div className="value">{usdCompact(p.junior)}</div>
-          <div className="sub">first loss, boosted yield + all fees</div>
+          <div className="sub">{pct(p.juniorApr, 2)} APR + fees · share {p.juniorSharePrice.toFixed(4)}</div>
         </div>
         <div className="tile">
           <div className="label">Utilization</div>
@@ -63,6 +65,21 @@ export function LpPanel({ snap, onDeposit, onWithdraw }: Props) {
         <div className="row"><span>Outstanding debt</span><span>{usd(p.debt)}</span></div>
         <div className="row"><span>Borrow capacity left</span><span>{usd(p.capacity)}</span></div>
         <div className="row"><span>Backstop inventory (marked, off-book)</span><span>{usd(p.inventoryValue)}</span></div>
+      </div>
+      <div className="sub" style={{ marginBottom: 12 }}>
+        Live from the contracts
+        {CFG.explorer && (
+          <>
+            {": "}
+            <a href={`${CFG.explorer}/address/${d.pool}`} target="_blank" rel="noreferrer">pool</a>
+            {" · "}
+            <a href={`${CFG.explorer}/address/${d.senior}`} target="_blank" rel="noreferrer">senior vault</a>
+            {" · "}
+            <a href={`${CFG.explorer}/address/${d.junior}`} target="_blank" rel="noreferrer">junior vault</a>
+          </>
+        )}
+        . APRs are interest only, from the pool's utilization-based rate; junior also receives opening and liquidation fees.
+        {CFG.wallet === "injected" && " On testnet the tranches were seeded by the deployer with mock USDC; deposit some yourself to see your share."}
       </div>
 
       <div className="seg" role="group" aria-label="Tranche">

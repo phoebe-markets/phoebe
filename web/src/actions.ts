@@ -1,5 +1,5 @@
 import { BaseError, ContractFunctionRevertedError, maxUint256, type Abi, type Address } from "viem";
-import { CFG, ensureChain, pub, type Abis, type Deployment, type Wallet } from "./chain";
+import { pub, type Abis, type Deployment, type Wallet } from "./chain";
 
 const USD = 1_000_000;
 export const toUsdc = (x: number) => BigInt(Math.round(x * USD));
@@ -21,6 +21,10 @@ const REASONS: Record<string, string> = {
 };
 
 export function explain(e: unknown): string {
+  // wallet (EIP-1193) errors: keep the code so problems are diagnosable
+  const code = (e as { code?: number }).code ?? (e as { cause?: { code?: number } }).cause?.code;
+  if (code === 4001) return "You rejected the request in your wallet";
+  if (code === 4100) return "Your wallet hasn't authorized this site for this account/network. Reconnect and approve Polygon Amoy (4100)";
   if (e instanceof BaseError) {
     const r = e.walk((x) => x instanceof ContractFunctionRevertedError);
     if (r instanceof ContractFunctionRevertedError) {
@@ -33,7 +37,6 @@ export function explain(e: unknown): string {
 }
 
 async function write(w: Wallet, address: Address, abi: Abi, functionName: string, args: unknown[]) {
-  if (CFG.wallet === "injected") await ensureChain(w); // the user may have switched networks in their wallet
   const { request } = await pub.simulateContract({ account: w.account, address, abi, functionName, args });
   const hash = await w.writeContract(request as never);
   const r = await pub.waitForTransactionReceipt({ hash });

@@ -1,7 +1,6 @@
 import {
   createPublicClient,
   createWalletClient,
-  custom,
   http,
   type Abi,
   type Account,
@@ -105,43 +104,6 @@ export const DEMO_ACCOUNTS: { label: string; pk: Hex }[] = [
 
 export function demoWallet(pk: Hex): Wallet {
   return createWalletClient({ chain: CFG.chain, transport, account: privateKeyToAccount(pk) });
-}
-
-type Eip1193 = { request(args: { method: string; params?: unknown[] }): Promise<unknown> };
-const injected = () => (window as unknown as { ethereum?: Eip1193 }).ethereum;
-export const hasInjectedWallet = () => !!injected();
-
-/** Connect a browser wallet (MetaMask, Rabby, ...) and make sure it's on this network's chain. */
-export async function connectInjected(): Promise<Wallet> {
-  const eth = injected();
-  if (!eth) throw new Error("No browser wallet found. Install MetaMask or Rabby to trade on testnet.");
-  const [address] = (await eth.request({ method: "eth_requestAccounts" })) as Address[];
-  const w = createWalletClient({ chain: CFG.chain, transport: custom(eth), account: address });
-  await ensureChain(w);
-  return w;
-}
-
-export async function ensureChain(w: Wallet) {
-  if ((await w.getChainId()) === CFG.chain.id) return;
-  try {
-    await w.switchChain({ id: CFG.chain.id });
-  } catch (e) {
-    // 4902: the wallet doesn't know this chain yet
-    if ((e as { code?: number }).code === 4902 || /Unrecognized chain|4902/.test(String(e))) {
-      await w.addChain({ chain: { ...CFG.chain, rpcUrls: { default: { http: [CFG.rpc] } } } });
-    } else throw e;
-  }
-}
-
-/** Fires when the injected wallet changes account or chain. */
-export function onInjectedChange(cb: () => void) {
-  const eth = injected() as (Eip1193 & { on?: (e: string, f: () => void) => void; removeListener?: (e: string, f: () => void) => void }) | undefined;
-  eth?.on?.("accountsChanged", cb);
-  eth?.on?.("chainChanged", cb);
-  return () => {
-    eth?.removeListener?.("accountsChanged", cb);
-    eth?.removeListener?.("chainChanged", cb);
-  };
 }
 
 // ---------------------------------------------------------------- protocol files

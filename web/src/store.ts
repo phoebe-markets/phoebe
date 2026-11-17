@@ -66,6 +66,10 @@ export type Snapshot = {
     maxWithdrawJunior: number;
     capacity: number;
     inventoryValue: number;
+    seniorSharePrice: number; // USDC per vault share
+    juniorSharePrice: number;
+    seniorApr: number; // from interest only (fees come on top for junior)
+    juniorApr: number;
   };
   fees: { openFeeBps: number; liqFeeBps: number; bonusBps: number; rampPerHour: number; maxBonusBps: number };
   account: {
@@ -186,6 +190,23 @@ class EventStore {
 }
 
 type PmLog = { eventName: string; blockNumber: bigint; logIndex: number; args: Record<string, bigint> };
+
+/**
+ * Mirrors LendingPool._previewAccrual: interest = debt * rate; senior gets seniorYieldShareBps of its pro-rata share,
+ * junior the rest. Returns per-tranche APRs and share prices (vault shares carry 12 decimals: 6 + offset 6).
+ */
+function trancheEconomics(s: number, j: number, debt: number, rate: number, sShares: bigint, jShares: bigint, seniorShareBps: number) {
+  const interest = debt * rate;
+  const total = s + j;
+  const seniorCut = total > 0 ? ((interest * s) / total) * (seniorShareBps / 10_000) : 0;
+  const px = (assets: number, shares: bigint) => (shares > 0n ? assets / (Number(shares) / 1e12) : 1);
+  return {
+    seniorSharePrice: px(s, sShares),
+    juniorSharePrice: px(j, jShares),
+    seniorApr: s > 0 ? seniorCut / s : 0,
+    juniorApr: j > 0 ? (interest - seniorCut) / j : 0,
+  };
+}
 
 export const fmt0 = (x: number) => x.toLocaleString("en-US", { maximumFractionDigits: 0 });
 
@@ -320,6 +341,9 @@ async function read(
     Promise.all(
       Array.from({ length: d.markets * 2 }, (_, k) => r<bigint>(d.positionManager, "pm", "inventoryValue", [BigInt(k + 1)])),
     ),
+    r<bigint>(d.senior, "vault", "totalSupply"),
+    r<bigint>(d.junior, "vault", "totalSupply"),
+    r<bigint>(d.pool, "pool", "seniorYieldShareBps"),
   ]);
 
   const feesP = Promise.all([
@@ -418,6 +442,7 @@ async function read(
       maxWithdrawJunior: n6(pool[7]),
       capacity: n6(pool[8]),
       inventoryValue: pool[9].reduce((a, b) => a + n6(b), 0),
+      ...trancheEconomics(n6(pool[0]), n6(pool[1]), n6(pool[3]), n18(pool[5]), pool[10], pool[11], Number(pool[12])),
     },
     fees: {
       openFeeBps: Number(fees[0]),

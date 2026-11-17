@@ -1,14 +1,15 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { useAccount, useConnect, useDisconnect, useSwitchChain } from "wagmi";
+import { getWalletClient } from "@wagmi/core";
+import { polygonAmoy } from "viem/chains";
+import { wagmiConfig } from "./wagmi";
 import {
   CFG,
   DEMO_ACCOUNTS,
   NET,
   NETWORKS,
-  connectInjected,
   demoWallet,
-  hasInjectedWallet,
   loadProtocol,
-  onInjectedChange,
   switchNet,
   type Abis,
   type Deployment,
@@ -47,44 +48,63 @@ function useTheme(): [Theme, (t: Theme) => void] {
   return [theme, setTheme];
 }
 
-/** Local: pick an Anvil demo account. Testnet: a connected browser wallet (null until connected). */
+/**
+ * Local: pick an Anvil demo account. Testnet: a browser wallet via wagmi. `getWallet()` returns a wallet client that
+ * is guaranteed to be on the right chain (switching / adding Amoy first if needed), or throws.
+ */
 function useWallet() {
   const [demoIdx, setDemoIdx] = useState(0);
-  const [injected, setInjected] = useState<Wallet | null>(null);
-  const [walletErr, setWalletErr] = useState<string | null>(null);
   const demo = useMemo(() => (CFG.wallet === "demo" ? demoWallet(DEMO_ACCOUNTS[demoIdx].pk) : null), [demoIdx]);
+  const { address, chainId, isConnected } = useAccount();
+  const { connectors, connectAsync, isPending } = useConnect();
+  const { disconnect } = useDisconnect();
+  const { switchChainAsync } = useSwitchChain();
+  const [walletErr, setWalletErr] = useState<string | null>(null);
 
-  const connect = useCallback(async () => {
-    setWalletErr(null);
-    try {
-      setInjected(await connectInjected());
-    } catch (e) {
-      setWalletErr((e as Error).message.split("\n")[0]);
-    }
-  }, []);
+  const connect = useCallback(
+    async (connectorId: string) => {
+      setWalletErr(null);
+      const c = connectors.find((x) => x.id === connectorId);
+      if (!c) return;
+      try {
+        // ask for Amoy at connect time, so the wallet grants this site the chain as well as the account
+        await connectAsync({ connector: c, chainId: polygonAmoy.id });
+      } catch (e) {
+        setWalletErr(explain(e));
+      }
+    },
+    [connectors, connectAsync],
+  );
 
-  useEffect(() => {
-    if (CFG.wallet !== "injected" || !hasInjectedWallet()) return;
-    // reconnect silently if this site is already authorized
-    const eth = (window as unknown as { ethereum: { request(a: { method: string }): Promise<unknown> } }).ethereum;
-    eth.request({ method: "eth_accounts" }).then(
-      (a) => {
-        if ((a as string[]).length) void connect();
-      },
-      () => {},
-    );
-    return onInjectedChange(() => {
-      eth.request({ method: "eth_accounts" }).then((a) => ((a as string[]).length ? connect() : setInjected(null)), () => {});
-    });
-  }, [connect]);
+  const getWallet = useCallback(async (): Promise<Wallet> => {
+    if (demo) return demo;
+    if (!isConnected) throw new Error("Connect a wallet first");
+    if (chainId !== polygonAmoy.id) await switchChainAsync({ chainId: polygonAmoy.id });
+    return (await getWalletClient(wagmiConfig, { chainId: polygonAmoy.id })) as unknown as Wallet;
+  }, [demo, isConnected, chainId, switchChainAsync]);
 
-  return { wallet: demo ?? injected, demoIdx, setDemoIdx, connect, walletErr };
+  // EIP-6963 discovery lists every installed wallet; fall back to the generic injected connector
+  const wallets = connectors.filter((c) => c.type === "injected" && (c.id !== "injected" || connectors.length === 1));
+  return {
+    address: demo ? demo.account.address : isConnected ? (address ?? null) : null,
+    wrongChain: !demo && isConnected && chainId !== polygonAmoy.id,
+    getWallet,
+    demoIdx,
+    setDemoIdx,
+    wallets,
+    connect,
+    connecting: isPending,
+    disconnect: () => disconnect(),
+    walletErr,
+    setWalletErr,
+  };
 }
 
 export function App() {
   const [proto, setProto] = useState<{ d: Deployment; abi: Abis } | null>(null);
   const [loadErr, setLoadErr] = useState<string | null>(null);
-  const { wallet, demoIdx, setDemoIdx, connect, walletErr } = useWallet();
+  const w = useWallet();
+  const { address } = w;
   const [marketIdx, setMarketIdx] = useState(0);
   const [faucetMsg, setFaucetMsg] = useState<string | null>(null);
   const [side, setSide] = useState<"YES" | "NO">("YES");
@@ -94,7 +114,6 @@ export function App() {
     loadProtocol().then(setProto, (e) => setLoadErr((e as Error).message));
   }, []);
 
-  const address = wallet?.account.address ?? null;
   const { snap, error, refreshNow } = useProtocol(proto?.d ?? null, proto?.abi ?? null, address);
 
   if (loadErr) {
@@ -122,9 +141,8 @@ export function App() {
   const { d, abi } = proto;
   // wrap actions: need a wallet; friendly revert reasons; refresh immediately instead of waiting for the poll
   const act = <A extends unknown[]>(f: (w: Wallet, ...a: A) => Promise<unknown>) => async (...a: A) => {
-    if (!wallet) throw new Error("Connect a wallet first");
     try {
-      await f(wallet, ...a);
+      await f(await w.getWallet(), ...a);
     } catch (e) {
       throw new Error(explain(e));
     } finally {
@@ -155,15 +173,25 @@ export function App() {
         <span className="chip" title="Chain time (replays run on historical time)">⏱ {when(snap.chainTime)} UTC</span>
         <span className="chip">block {String(snap.block)}</span>
         {CFG.wallet === "demo" ? (
-          <select aria-label="Account" value={demoIdx} onChange={(e) => setDemoIdx(Number(e.target.value))} style={{ width: "auto" }}>
+          <select aria-label="Account" value={w.demoIdx} onChange={(e) => w.setDemoIdx(Number(e.target.value))} style={{ width: "auto" }}>
             {DEMO_ACCOUNTS.map((a, i) => (
               <option key={a.label} value={i}>{a.label} · {shortAddr(demoWallet(a.pk).account.address)}</option>
             ))}
           </select>
         ) : address ? (
-          <a className="chip" href={`${CFG.explorer}/address/${address}`} target="_blank" rel="noreferrer">{shortAddr(address)}</a>
+          <>
+            <a className="chip" href={`${CFG.explorer}/address/${address}`} target="_blank" rel="noreferrer">{shortAddr(address)}</a>
+            <button className="btn ghost" onClick={w.disconnect}>Disconnect</button>
+          </>
+        ) : w.wallets.length === 0 ? (
+          <span className="chip">No browser wallet found: install MetaMask or Rabby</span>
         ) : (
-          <button className="btn" style={{ width: "auto", padding: "6px 14px" }} onClick={connect}>Connect wallet</button>
+          w.wallets.map((c) => (
+            <button key={c.uid} className="btn" style={{ width: "auto", padding: "6px 14px" }} disabled={w.connecting}
+              onClick={() => w.connect(c.id)}>
+              {w.connecting ? "Connecting…" : `Connect ${c.name === "Injected" ? "wallet" : c.name}`}
+            </button>
+          ))
         )}
         {address && <span className="chip">{usd(snap.account.usdc)} USDC</span>}
         {CFG.wallet === "injected" && address && (
@@ -186,7 +214,8 @@ export function App() {
       </header>
 
       {error && <div className="banner">Chain read failed, showing the last good state: {error}</div>}
-      {walletErr && <div className="banner">{walletErr}</div>}
+      {w.walletErr && <div className="banner">{w.walletErr}</div>}
+      {w.wrongChain && <div className="banner">Your wallet is on another network; Phoebe will ask it to switch to Polygon Amoy when you transact.</div>}
       {faucetMsg && <div className="banner">{faucetMsg}</div>}
       {NET === "amoy" && (
         <div className="sub">
@@ -206,7 +235,7 @@ export function App() {
         onAddMargin={act((w: Wallet, id: bigint, amount: number) => addMargin(w, d, abi, id, amount))} />
 
       <div className="grid-2">
-        <LpPanel key={`lp-${address}`} snap={snap}
+        <LpPanel key={`lp-${address}`} snap={snap} d={d}
           onDeposit={act((w: Wallet, t: "senior" | "junior", amount: number) => deposit(w, d, abi, t, amount))}
           onWithdraw={act((w: Wallet, t: "senior" | "junior", amount: number) => withdraw(w, d, abi, t, amount))} />
         <ActivityFeed items={snap.activity} />
