@@ -52,6 +52,7 @@ contract LendingPool is Ownable {
     event Borrowed(uint256 amount, uint256 scaled);
     event Repaid(uint256 amount, uint256 scaled);
     event WrittenOff(uint256 owed, uint256 recovered, uint256 juniorLoss, uint256 seniorLoss);
+    event Donated(uint256 amount, uint8 tranche);
     event TrancheDeposit(uint8 indexed tranche, uint256 assets);
     event TrancheWithdraw(uint8 indexed tranche, uint256 assets, address receiver);
 
@@ -218,6 +219,17 @@ contract LendingPool is Ownable {
         trancheAssets_[JUNIOR] -= jl;
         trancheAssets_[SENIOR] -= sl;
         emit WrittenOff(owed, recovered, jl, sl);
+    }
+
+    /// @notice Protocol fees (opening fees, liquidation fees) paid to the pool. They go to junior, the insurance
+    ///         buffer that takes first loss, or to senior if there's no junior.
+    function donate(uint256 amount) external onlyManager {
+        accrue();
+        usdc.safeTransferFrom(msg.sender, address(this), amount);
+        cash += amount;
+        uint8 t = trancheAssets_[JUNIOR] > 0 ? JUNIOR : SENIOR;
+        trancheAssets_[t] += amount;
+        emit Donated(amount, t);
     }
 
     /// @notice Converts scaled debt to USDC owed at the current (already-accrued) index.

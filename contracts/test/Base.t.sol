@@ -7,7 +7,7 @@ import {ERC1155Holder} from "@openzeppelin/contracts/token/ERC1155/utils/ERC1155
 
 import {MockUSDC} from "../src/mocks/MockUSDC.sol";
 import {MockCTF} from "../src/mocks/MockCTF.sol";
-import {MockOracle} from "../src/mocks/MockOracle.sol";
+import {KeeperOracle} from "../src/KeeperOracle.sol";
 import {MockVenue} from "../src/mocks/MockVenue.sol";
 import {LendingPool} from "../src/LendingPool.sol";
 import {TrancheVault} from "../src/TrancheVault.sol";
@@ -20,7 +20,7 @@ contract Base is Test, ERC1155Holder {
 
     MockUSDC usdc;
     MockCTF ctf;
-    MockOracle oracle;
+    KeeperOracle oracle;
     MockVenue venue;
     LendingPool pool;
     TrancheVault senior;
@@ -41,7 +41,7 @@ contract Base is Test, ERC1155Holder {
 
         usdc = new MockUSDC();
         ctf = new MockCTF();
-        oracle = new MockOracle();
+        oracle = new KeeperOracle();
         venue = new MockVenue(usdc, ctf, oracle, 50); // 0.5% half-spread
         ctf.setMinter(address(venue), true);
         usdc.mint(address(venue), 10_000_000 * USD);

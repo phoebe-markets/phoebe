@@ -3,3 +3,5 @@ contracts/cache/
 contracts/broadcast/*/31337/
 node_modules/
 .env
+sim/out/*
+!sim/out/.gitkeep

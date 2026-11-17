@@ -56,7 +56,9 @@ contract PositionManager is ERC1155Holder, Ownable, ReentrancyGuard {
     IPriceOracle public oracle;
     IExecutionVenue public venue;
 
-    uint256 public liquidationBonusBps = 500;
+    uint256 public liquidationBonusBps = 500; // to the liquidator
+    uint256 public liquidationFeeBps; // to the pool (junior), on top of the bonus
+    uint256 public openFeeBps; // of the borrowed amount, to the pool (junior)
     uint256 public maxPriceAge = 10 minutes;
 
     uint256 public nextId = 1;
@@ -123,6 +125,11 @@ contract PositionManager is ERC1155Holder, Ownable, ReentrancyGuard {
         (liquidationBonusBps, maxPriceAge) = (_liquidationBonusBps, _maxPriceAge);
     }
 
+    function setFees(uint256 _openFeeBps, uint256 _liquidationFeeBps) external onlyOwner {
+        require(_openFeeBps <= 500 && _liquidationFeeBps <= 1_000, "fee");
+        (openFeeBps, liquidationFeeBps) = (_openFeeBps, _liquidationFeeBps);
+    }
+
     function _setVenue(IExecutionVenue v) internal {
         venue = v;
         ctf.setApprovalForAll(address(v), true);
@@ -132,6 +139,7 @@ contract PositionManager is ERC1155Holder, Ownable, ReentrancyGuard {
 
     /// @param margin       USDC the trader posts.
     /// @param borrowAmount USDC borrowed from the pool. Leverage = (margin + borrow) / margin.
+    ///                     The opening fee (openFeeBps of this) is pulled on top of `margin`.
     /// @param minShares    Slippage bound on the venue buy.
     function open(uint256 tokenId, uint256 margin, uint256 borrowAmount, uint256 minShares)
         external
@@ -143,6 +151,12 @@ contract PositionManager is ERC1155Holder, Ownable, ReentrancyGuard {
         uint256 price = _price(tokenId);
 
         usdc.safeTransferFrom(msg.sender, address(this), margin);
+        uint256 fee = borrowAmount * openFeeBps / BPS;
+        if (fee > 0) {
+            usdc.safeTransferFrom(msg.sender, address(this), fee);
+            usdc.forceApprove(address(pool), fee);
+            pool.donate(fee);
+        }
 
         uint256 scaled;
         if (borrowAmount > 0) {
@@ -226,19 +240,24 @@ contract PositionManager is ERC1155Holder, Ownable, ReentrancyGuard {
         Health memory h = _health(p, pool.borrowIndex());
         if (!h.liquidatable) revert Healthy();
 
-        // Shares the debt buys at the discounted (bonus) price.
+        // Shares the debt (plus protocol fee) buys at the discounted (bonus) price.
+        uint256 premium = liquidationBonusBps + liquidationFeeBps;
         uint256 sharesForDebt =
-            h.priceWad == 0 ? type(uint256).max : h.debt.mulDiv((BPS + liquidationBonusBps) * WAD, BPS * h.priceWad);
+            h.priceWad == 0 ? type(uint256).max : h.debt.mulDiv((BPS + premium) * WAD, BPS * h.priceWad);
 
         uint256 badDebt;
         uint256 toOwner;
+        uint256 fee;
         if (sharesForDebt <= p.shares) {
-            paid = h.debt;
+            fee = h.debt * liquidationFeeBps / BPS;
+            paid = h.debt + fee;
             seized = sharesForDebt;
             toOwner = p.shares - seized;
         } else {
+            // Underwater: everything recovered goes to the debt, no protocol fee.
             seized = p.shares;
             paid = h.value.mulDiv(BPS, BPS + liquidationBonusBps);
+            if (paid > h.debt) paid = h.debt; // collateral covers debt but not debt+fee+bonus
             badDebt = h.debt - paid;
         }
         require(paid <= maxPay, "maxPay");
@@ -250,6 +269,7 @@ contract PositionManager is ERC1155Holder, Ownable, ReentrancyGuard {
         }
         if (badDebt == 0) pool.repay(p.scaledDebt);
         else pool.writeOff(p.scaledDebt, paid);
+        if (fee > 0) pool.donate(fee);
 
         if (toOwner > 0) claimableShares[p.owner][p.tokenId] += toOwner;
         ctf.safeTransferFrom(address(this), msg.sender, p.tokenId, seized, "");

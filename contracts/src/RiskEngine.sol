@@ -2,18 +2,23 @@
 pragma solidity ^0.8.24;
 
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
+import {IVolatilityOracle} from "./interfaces/IVolatilityOracle.sol";
 
 /// @title RiskEngine
 /// @notice Per-market whitelist plus LTV limits that shrink as price nears 0 or 1 and as resolution nears.
 ///
-///   liqLtv(p, t) = market.liqLtvBps * priceFactor(p) * timeFactor(t)
-///   maxLtv(p, t) = liqLtv(p, t) - market.openBufferBps            (floored at 0)
+///   liqLtv(p, t, s) = min( market.liqLtvBps * priceFactor(p) * timeFactor(t),  volCap(p, s) )
+///   maxLtv(p, t, s) = liqLtv(p, t, s) - market.openBufferBps            (floored at 0)
 ///
 /// priceFactor: 1 inside [safeLow, safeHigh], falls linearly to 0 at `floor` / `ceil`.
 ///   Near 1 the upside is tiny and the only big move is a jump to 0. Near 0 the share is a lottery ticket.
 /// timeFactor:  1 until `rampDuration` before the cutoff, then falls linearly to 0 at
 ///   `resolutionTime - cutoffDuration`. At 0, every open position becomes liquidatable, so nothing
 ///   leveraged reaches resolution (the 0/1 jump).
+/// volCap:      1 - (k * sigma(H) + J) / p, where sigma(H) is the oracle's realized 1-sigma absolute move over the horizon
+///   H (default 1 day), J is a fixed jump allowance, and p is this token's price. A position at the liquidation LTV then still has
+///   collateral cushion for a k-sigma move (default k = 2). Calm markets: the cap doesn't bind. Turbulent
+///   markets: leverage falls, and existing positions get liquidated while still solvent, before the jump.
 ///
 /// Leverage = 1 / (1 - LTV). E.g. LTV 75% -> 4x.
 contract RiskEngine is Ownable {
@@ -42,9 +47,19 @@ contract RiskEngine is Ownable {
     PriceBands public bands;
     mapping(address => bool) public guardians;
 
+    /// @notice Unset => no volatility cap.
+    IVolatilityOracle public volOracle;
+    uint32 public volHorizon = 1 days;
+    uint32 public volKBps = 20_000; // k = 2.0
+    /// @notice Absolute price jump (WAD) the liquidation cushion must always absorb, on top of k*sigma.
+    ///         Covers jumps out of calm markets that realized vol can't see. 0 = off.
+    uint64 public jumpWad;
+
     event MarketListed(uint256 indexed tokenId, Market config);
     event MarketOpenEnabled(uint256 indexed tokenId, bool enabled);
     event BandsSet(PriceBands bands);
+    event VolParamsSet(address oracle, uint32 horizon, uint32 kBps);
+    event JumpAllowanceSet(uint64 jumpWad);
 
     error BadConfig();
     error NotGuardian();
@@ -72,6 +87,18 @@ contract RiskEngine is Ownable {
         }
         bands = b;
         emit BandsSet(b);
+    }
+
+    function setVolParams(IVolatilityOracle oracle, uint32 horizon, uint32 kBps) external onlyOwner {
+        if (horizon == 0) revert BadConfig();
+        (volOracle, volHorizon, volKBps) = (oracle, horizon, kBps);
+        emit VolParamsSet(address(oracle), horizon, kBps);
+    }
+
+    function setJumpAllowance(uint64 _jumpWad) external onlyOwner {
+        if (_jumpWad > WAD) revert BadConfig();
+        jumpWad = _jumpWad;
+        emit JumpAllowanceSet(_jumpWad);
     }
 
     function setGuardian(address who, bool allowed) external onlyOwner {
@@ -114,11 +141,24 @@ contract RiskEngine is Ownable {
         return left * WAD / m.rampDuration;
     }
 
+    /// @return Cap on liquidation LTV (bps): the cushion (1 - LTV) must cover (k*sigma + jump) / price.
+    ///         BPS (no cap) if neither a vol oracle nor a jump allowance is set.
+    function volCapBps(uint256 tokenId, uint256 priceWad) public view returns (uint256) {
+        uint256 absMove = jumpWad; // WAD
+        if (address(volOracle) != address(0)) absMove += volOracle.sigmaWad(tokenId, volHorizon) * volKBps / BPS;
+        if (absMove == 0) return BPS;
+        if (priceWad == 0) return 0;
+        uint256 move = absMove * BPS / priceWad; // relative move, bps
+        return move >= BPS ? 0 : BPS - move;
+    }
+
     /// @return LTV in bps above which a position can be liquidated.
     function liqLtvBps(uint256 tokenId, uint256 priceWad) public view returns (uint256) {
         Market memory m = markets[tokenId];
         if (!m.listed) return 0;
-        return uint256(m.liqLtvBps) * priceFactorWad(priceWad) / WAD * timeFactorWad(tokenId) / WAD;
+        uint256 base = uint256(m.liqLtvBps) * priceFactorWad(priceWad) / WAD * timeFactorWad(tokenId) / WAD;
+        uint256 cap = volCapBps(tokenId, priceWad);
+        return base < cap ? base : cap;
     }
 
     /// @return Max LTV in bps a position may be opened at (or leveraged up to).
