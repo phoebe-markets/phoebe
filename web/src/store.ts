@@ -16,6 +16,7 @@ export type SideView = {
   liqLtv: number;
   openAllowed: boolean;
   maxPositionBorrow: number; // USD, 0 = none
+  maxPositionSize: number; // USD, margin + borrow, 0 = none
   why: RiskBreakdown; // TS mirror, for the explanation
 };
 
@@ -327,11 +328,12 @@ async function read(
     pub.readContract({ address, abi: abi[a], functionName, args }) as Promise<T>;
 
   const sideView = async (i: number, tokenId: bigint): Promise<SideView> => {
-    const [[price], sigma, openAllowed, maxPos] = await Promise.all([
+    const [[price], sigma, openAllowed, maxPos, maxSize] = await Promise.all([
       r<readonly [bigint, bigint]>(d.oracle, "oracle", "getPrice", [tokenId]),
       r<bigint>(d.oracle, "oracle", "sigmaWad", [tokenId, 86_400n]),
       r<boolean>(d.risk, "risk", "isOpenAllowed", [tokenId]),
       r<bigint>(d.risk, "risk", "maxPositionBorrow", [tokenId]),
+      r<bigint>(d.risk, "risk", "maxPositionSize", [tokenId]).catch(() => 0n), // older deployments lack it
     ]);
     // limits at the current price (second round: they take the price as an argument)
     const [maxLtvBps, liqLtvBps] = await Promise.all([
@@ -348,6 +350,7 @@ async function read(
       liqLtv: Number(liqLtvBps) / 10_000,
       openAllowed,
       maxPositionBorrow: n6(maxPos),
+      maxPositionSize: n6(maxSize),
       why: breakdown(p, s, now, params.riskParams, params.marketParams[i]),
     };
   };

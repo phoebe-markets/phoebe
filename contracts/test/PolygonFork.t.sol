@@ -14,32 +14,31 @@ import {RiskEngine} from "../src/RiskEngine.sol";
 import {PositionManager} from "../src/PositionManager.sol";
 import {ICtfRedeemer} from "../src/interfaces/IConditionalTokens.sol";
 
-interface IOnramp {
+interface IRamp {
     function wrap(address asset, address to, uint256 amount) external;
-}
-
-interface ICtfAdapter {
-    function splitPosition(address, bytes32, bytes32 conditionId, uint256[] calldata, uint256 amount) external;
+    function unwrap(address asset, address to, uint256 amount) external;
 }
 
 interface ICTF {
+    function splitPosition(address collateral, bytes32 parent, bytes32 conditionId, uint256[] calldata, uint256 amount)
+        external;
     function reportPayouts(bytes32 questionId, uint256[] calldata payouts) external;
     function payoutDenominator(bytes32 conditionId) external view returns (uint256);
 }
 
-/// @notice The whole protocol against Polymarket's real contracts on a Polygon fork: real pUSD as the pool asset,
-///         real CTF outcome tokens as collateral (stocked by splitting pUSD through the CtfCollateralAdapter, as
-///         the mainnet maker does), KeeperVenue fills, liquidation, absorb, and settlement through the adapter
-///         after resolving the real condition (pranking its UMA CTF adapter oracle).
+/// @notice The whole protocol against Polymarket's real contracts on a Polygon fork: USDC.e (the CTF's own
+///         collateral) as the pool asset, real CTF outcome tokens as collateral (stocked by splitting USDC.e on the
+///         CTF, as the mainnet maker does), KeeperVenue fills, liquidation, absorb, and settlement by redeeming on
+///         the CTF directly after resolving the real condition (pranking its UMA CTF adapter oracle).
 ///
-///   POLYGON_RPC=https://polygon-bor-rpc.publicnode.com forge test --mc PolygonFork -vv
+///   POLYGON_RPC=https://polygon.drpc.org forge test --mc PolygonFork -vv   (needs an archive-capable RPC)
 contract PolygonForkTest is Test, ERC1155Holder {
     // Polymarket on Polygon (ctf-exchange-v2 README; checked by keeper/src/polygon-facts.ts)
     IERC20 constant PUSD = IERC20(0xC011a7E12a19f7B1f670d46F03B03f3342E82DFB);
     IERC20 constant USDCE = IERC20(0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174);
     IERC1155 constant CTF = IERC1155(0x4D97DCd97eC945f40cF65F87097ACe5EA0476045);
     address constant ONRAMP = 0x93070a847efEf7F70739046A929D47a521F5B8ee;
-    address constant ADAPTER = 0xADa100874d00e3331D00F2007a9c336a65009718;
+    address constant OFFRAMP = 0x2957922Eb93258b93368531d39fAcCA3B4dC5854;
 
     // "Will Anthropic's valuation hit (HIGH) $1.75T by December 31?" (deployments/polygon-markets.env)
     bytes32 constant COND = 0xc68fea7daba83292fdd7bb704f26d38c4f678cbc2ff69c4175d47c55e74b4321;
@@ -70,11 +69,10 @@ contract PolygonForkTest is Test, ERC1155Holder {
 
         oracle = new KeeperOracle();
         oracle.setComplement(NO, YES);
-        oracle.setStepLimit(0.1e18, 30);
-        venue = new KeeperVenue(PUSD, CTF, oracle, maker);
+        venue = new KeeperVenue(USDCE, CTF, oracle, maker);
         venue.setParams(150, 10 minutes);
 
-        pool = new LendingPool(PUSD);
+        pool = new LendingPool(USDCE);
         senior = new TrancheVault(pool, 0, "Phoebe Senior", "phSR");
         junior = new TrancheVault(pool, 1, "Phoebe Junior", "phJR");
         pool.setVaults(address(senior), address(junior));
@@ -94,51 +92,46 @@ contract PolygonForkTest is Test, ERC1155Holder {
         risk.listMarket(YES, m);
         risk.listMarket(NO, m);
 
-        pm = new PositionManager(PUSD, CTF, pool, risk, oracle, venue);
+        pm = new PositionManager(USDCE, CTF, pool, risk, oracle, venue);
         pm.setParams(300, 15 minutes);
         pm.setAbsorbUnderwater(true);
         pm.setCondition(YES, NO, COND);
-        pm.setRedeemer(ICtfRedeemer(ADAPTER));
+        pm.setRedeemer(ICtfRedeemer(address(CTF)));
         pool.setManager(address(pm));
         venue.setCaller(address(pm), true);
 
         oracle.setPrice(YES, 0.45e18);
 
         // LPs (at the caps), trader, liquidator (this contract)
-        _pusd(lp, 300 * USD);
+        _usdce(lp, 300 * USD);
         vm.startPrank(lp);
-        PUSD.approve(address(senior), type(uint256).max);
-        PUSD.approve(address(junior), type(uint256).max);
+        USDCE.approve(address(senior), type(uint256).max);
+        USDCE.approve(address(junior), type(uint256).max);
         senior.deposit(200 * USD, lp);
         junior.deposit(100 * USD, lp);
         vm.stopPrank();
-        _pusd(trader, 200 * USD);
+        _usdce(trader, 200 * USD);
         vm.prank(trader);
-        PUSD.approve(address(pm), type(uint256).max);
-        _pusd(address(this), 200 * USD);
-        PUSD.approve(address(pm), type(uint256).max);
+        USDCE.approve(address(pm), type(uint256).max);
+        _usdce(address(this), 200 * USD);
+        USDCE.approve(address(pm), type(uint256).max);
 
-        // Maker: split 300 pUSD into 300 YES + 300 NO via the adapter, keep 200 pUSD for buybacks
-        _pusd(maker, 500 * USD);
+        // Maker: split 300 USDC.e into 300 YES + 300 NO on the CTF, keep 200 USDC.e for buybacks
+        deal(address(USDCE), maker, 500 * USD);
         vm.startPrank(maker);
-        PUSD.approve(ADAPTER, 300 * USD);
+        USDCE.approve(address(CTF), 300 * USD);
         uint256[] memory partition = new uint256[](2);
         (partition[0], partition[1]) = (1, 2);
-        ICtfAdapter(ADAPTER).splitPosition(address(PUSD), bytes32(0), COND, partition, 300 * USD);
-        PUSD.approve(address(venue), type(uint256).max);
+        ICTF(address(CTF)).splitPosition(address(USDCE), bytes32(0), COND, partition, 300 * USD);
+        USDCE.approve(address(venue), type(uint256).max);
         CTF.setApprovalForAll(address(venue), true);
         vm.stopPrank();
         assertEq(CTF.balanceOf(maker, YES), 300 * USD, "split gave YES");
         assertEq(CTF.balanceOf(maker, NO), 300 * USD, "split gave NO");
     }
 
-    /// Real pUSD the honest way: USDC.e wrapped through Polymarket's onramp.
-    function _pusd(address to, uint256 amt) internal {
-        deal(address(USDCE), to, amt);
-        vm.startPrank(to);
-        USDCE.approve(ONRAMP, amt);
-        IOnramp(ONRAMP).wrap(address(USDCE), to, amt);
-        vm.stopPrank();
+    function _usdce(address to, uint256 amt) internal {
+        deal(address(USDCE), to, USDCE.balanceOf(to) + amt);
     }
 
     function _assertPoolInvariant() internal view {
@@ -146,7 +139,7 @@ contract PolygonForkTest is Test, ERC1155Holder {
     }
 
     function test_openCloseWithRealOutcomeTokens() public {
-        uint256 t0 = PUSD.balanceOf(trader);
+        uint256 t0 = USDCE.balanceOf(trader);
         vm.prank(trader);
         uint256 id = pm.open(YES, 20 * USD, 20 * USD, 0); // 2x
         (,, uint256 shares,) = pm.positions(id);
@@ -157,7 +150,7 @@ contract PolygonForkTest is Test, ERC1155Holder {
         vm.prank(trader);
         pm.close(id, 0);
         assertEq(CTF.balanceOf(address(pm), YES), 0);
-        assertGt(PUSD.balanceOf(trader), t0, "profitable after +5c at 2x, net of spread and fee");
+        assertGt(USDCE.balanceOf(trader), t0, "profitable after +5c at 2x, net of spread and fee");
         assertEq(pool.totalDebt(), 0);
         _assertPoolInvariant();
     }
@@ -165,26 +158,22 @@ contract PolygonForkTest is Test, ERC1155Holder {
     function test_liquidationPaysOutRealShares() public {
         vm.prank(trader);
         uint256 id = pm.open(YES, 15 * USD, 25 * USD, 0);
-        for (uint256 i; i < 2; ++i) {
-            skip(30);
-            oracle.setPrice(YES, 0.3e18); // clamped: 0.45 -> 0.35 -> 0.30 (+ volatility tightens the line)
-        }
+        skip(30);
+        oracle.setPrice(YES, 0.3e18);
         assertTrue(pm.health(id).liquidatable);
         pm.liquidate(id, type(uint256).max);
         assertGt(CTF.balanceOf(address(this), YES), 0, "liquidator received real YES shares");
         _assertPoolInvariant();
     }
 
-    function test_settlementThroughAdapter() public {
+    function test_settlementRedeemsOnCtf() public {
         // one live position and one absorbed into inventory
         vm.prank(trader);
         uint256 live = pm.open(YES, 30 * USD, 20 * USD, 0);
         vm.prank(trader);
         uint256 sunk = pm.open(YES, 10 * USD, 15 * USD, 0);
-        for (uint256 i; i < 4; ++i) {
-            skip(30);
-            oracle.setPrice(YES, 0.12e18);
-        }
+        skip(30);
+        oracle.setPrice(YES, 0.12e18);
         pm.absorb(sunk);
         (,, uint256 liveShares,) = pm.positions(live);
         uint256 inv = pm.inventory(YES);
@@ -197,24 +186,38 @@ contract PolygonForkTest is Test, ERC1155Holder {
         ICTF(address(CTF)).reportPayouts(QUESTION, payouts);
 
         uint256 j0 = pool.trancheAssets(1);
-        uint256 t0 = PUSD.balanceOf(trader);
+        uint256 t0 = USDCE.balanceOf(trader);
         uint256 debt = pm.debtOf(live);
         pm.redeem(COND);
-        assertEq(CTF.balanceOf(address(pm), YES), 0, "adapter pulled everything");
+        assertEq(CTF.balanceOf(address(pm), YES), 0, "CTF redeemed everything");
         assertApproxEqAbs(pool.trancheAssets(1) - j0, inv, 1, "inventory paid to junior at $1");
 
         pm.settle(live);
-        assertEq(PUSD.balanceOf(trader) - t0, liveShares - debt, "trader paid shares at $1 minus debt");
-        assertLe(PUSD.balanceOf(address(pm)), 2, "no pUSD stranded in the manager");
+        assertEq(USDCE.balanceOf(trader) - t0, liveShares - debt, "trader paid shares at $1 minus debt");
+        assertLe(USDCE.balanceOf(address(pm)), 2, "no USDC.e stranded in the manager");
         assertEq(pool.totalDebt(), 0);
         _assertPoolInvariant();
     }
 
     function test_depositCapHolds() public {
         assertEq(senior.maxDeposit(lp), 0);
-        _pusd(lp, 1 * USD);
+        _usdce(lp, 1 * USD);
         vm.prank(lp);
         vm.expectRevert();
         senior.deposit(1 * USD, lp);
+    }
+
+    /// The maker's CLOB float: venue proceeds arrive in USDC.e, Polymarket's exchange settles in pUSD. The ramps
+    /// convert 1:1 both ways.
+    function test_makerRampsUsdceAndPusd() public {
+        vm.startPrank(maker);
+        USDCE.approve(ONRAMP, 50 * USD);
+        IRamp(ONRAMP).wrap(address(USDCE), maker, 50 * USD);
+        assertEq(PUSD.balanceOf(maker), 50 * USD);
+        PUSD.approve(OFFRAMP, 20 * USD);
+        IRamp(OFFRAMP).unwrap(address(USDCE), maker, 20 * USD);
+        vm.stopPrank();
+        assertEq(PUSD.balanceOf(maker), 30 * USD);
+        assertEq(USDCE.balanceOf(maker), 170 * USD);
     }
 }

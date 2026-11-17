@@ -17,9 +17,9 @@ import {
   type Wallet,
 } from "./chain";
 import { useProtocol, type PositionView } from "./store";
-import { addMargin, closePosition, deposit, explain, mintTestUsdc, openPosition, settlePosition, withdraw, wrapPusd } from "./actions";
+import { addMargin, closePosition, deposit, explain, mintTestUsdc, openPosition, settlePosition, unwrapPusd, withdraw } from "./actions";
 import { StatusBanner } from "./components/StatusBanner";
-import { PusdPanel } from "./components/PusdPanel";
+import { UsdcePanel } from "./components/UsdcePanel";
 import { MarketBar, MarketPanel } from "./components/MarketPanel";
 import { TradePanel } from "./components/TradePanel";
 import { Positions } from "./components/Positions";
@@ -265,7 +265,7 @@ export function App() {
   };
 
   const pusdCard = CFG.mainnet && address ? (
-    <PusdPanel snap={snap} address={address} onWrap={act((w: Wallet, amount: number) => wrapPusd(w, amount))} />
+    <UsdcePanel snap={snap} address={address} onUnwrap={act((w: Wallet, amount: number) => unwrapPusd(w, amount))} />
   ) : null;
 
   const wallet =

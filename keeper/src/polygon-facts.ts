@@ -7,11 +7,11 @@
  *
  * Confirms, on-chain:
  *   - the CTF and collateral (pUSD) the Polymarket exchanges use
- *   - the CTF positions themselves are USDC.e-backed (legacy CTF); Polymarket's CtfCollateralAdapter does
- *     split/merge/redeem in pUSD by unwrapping/wrapping around the CTF. We settle through that adapter, so the
- *     pool stays in pUSD. Checks the adapter's wiring and pause state.
+ *   - the CTF positions themselves are USDC.e-backed (legacy CTF; Polymarket's CtfCollateralAdapter wraps
+ *     split/merge/redeem into pUSD). Our pool asset is USDC.e, so we split/merge/redeem on the CTF directly and
+ *     only the maker's CLOB float is pUSD (onramp/offramp, 1:1). Checks the ramps' pause state.
  *   - every candidate's YES/NO token ids == getPositionId(USDC.e, getCollectionId(0, conditionId, indexSet)),
- *     i.e. the adapter can redeem them
+ *     i.e. the CTF redeems them for USDC.e
  *   - binary (2 outcome slots), not yet resolved
  * Market filters (Gamma API): order book on, not neg-risk, Yes/No outcomes, mid within [0.2, 0.8], tight spread,
  * resolves at least --min-days out. Ranked by 24h volume.
@@ -181,10 +181,9 @@ if (WRITE > 0) {
   const q = (xs: (string | number)[]) => xs.join(",");
   const env = [
     `# Polymarket markets for the Polygon mainnet deployment (picked ${new Date().toISOString().slice(0, 10)} by keeper/src/polygon-facts.ts:`,
-    `# not neg-risk, Yes/No, mid 0.2-0.8, spread <= ${MAX_SPREAD}, >= ${MIN_DAYS} days out, token ids verified as USDC.e CTF positions, settled in pUSD via the adapter)`,
+    `# not neg-risk, Yes/No, mid 0.2-0.8, spread <= ${MAX_SPREAD}, >= ${MIN_DAYS} days out, token ids verified as USDC.e CTF positions; pool asset USDC.e, redeemed on the CTF)`,
     `POLY_CTF=${ctf}`,
-    `POLY_COLLATERAL=${collateral}`,
-    `POLY_CTF_ADAPTER=${CTF_ADAPTER}`,
+    `POLY_COLLATERAL=${usdce}`,
     `MARKET_NAMES="${q(top.map((m) => m.question.replaceAll('"', "").replaceAll(",", "").replaceAll("$", "\\$")))}"`,
     `MARKET_SLUGS=${q(top.map((m) => m.slug))}`,
     `CONDITION_IDS=${q(top.map((m) => m.conditionId))}`,

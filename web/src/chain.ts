@@ -58,7 +58,7 @@ type NetConfig = {
   asset: string;
   /** Testnet: the pool asset is a mock anyone can mint. */
   faucet: boolean;
-  /** Real money: show the risk notice and the pUSD on-ramp. */
+  /** Real money: show the risk notice and the "Get USDC.e" card. */
   mainnet: boolean;
 };
 
@@ -96,7 +96,7 @@ export const NETWORKS: Record<Net, NetConfig> = {
     wallet: "injected",
     explorer: "https://polygonscan.com",
     minTipGwei: 30,
-    asset: "pUSD",
+    asset: "USDC.e",
     faucet: false,
     mainnet: true,
   },

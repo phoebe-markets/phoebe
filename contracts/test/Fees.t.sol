@@ -110,6 +110,16 @@ contract ClusterTest is Base {
         _open(1_000 * USD, 1_500 * USD); // at the cap: fine
     }
 
+    function test_maxPositionSize() public {
+        uint256[] memory ids = new uint256[](1);
+        ids[0] = YES;
+        risk.setMaxPositionSize(ids, 2_000 * USD);
+        vm.prank(trader);
+        vm.expectRevert(PositionManager.PositionTooLarge.selector);
+        pm.open(YES, 1_500 * USD, 600 * USD, 0); // all-margin size counts too
+        _open(1_000 * USD, 1_000 * USD); // at the cap: fine
+    }
+
     function test_clusterDebtReleasedOnClose() public {
         uint256 id = _open(1_000 * USD, 2_000 * USD);
         vm.prank(trader);

@@ -45,12 +45,13 @@ import {ICtfRedeemer} from "../src/interfaces/IConditionalTokens.sol";
 ///
 /// Polygon mainnet (NETWORK=polygon; demo/polygon.sh sets this up from deployments/polygon-markets.env):
 ///   real Polymarket contracts, no mocks, no minting, no LP seed. Market i trades Polymarket's own token ids.
-///   POLY_COLLATERAL     pool asset (pUSD)            POLY_CTF          ConditionalTokens
-///   POLY_CTF_ADAPTER    redeems in pUSD (CtfCollateralAdapter)
+///   POLY_COLLATERAL     pool asset: USDC.e, the CTF's own collateral (positions redeem on the CTF directly)
+///   POLY_CTF            ConditionalTokens (also the redeemer)
 ///   POLY_TOKEN_IDS / POLY_NO_TOKEN_IDS / CONDITION_IDS   per market
 ///   SENIOR_CAP_USD / JUNIOR_CAP_USD (default 200 / 100), MARKET_MAX_POSITION (default 30 each),
+///   MAX_POSITION_SIZE_USD margin + borrow per position, all markets (default 40; the hedger sizes orders off it),
 ///   MARKET_BORROW_CAP_USD (default 100), VENUE_SPREAD_BPS (default 150)
-///   Launch guards: oracle step limit 0.10 per 30s, KeeperVenue max price age 10 min, PositionManager 15 min,
+///   Launch guards: KeeperVenue max price age 10 min, PositionManager 15 min,
 ///   the keeper is a guardian everywhere (it can pause; only the deployer/owner un-pauses).
 /// Mock deployments (local, Amoy) also get a condition per market, so settlement can be rehearsed with
 /// MockCTF.reportPayouts.
@@ -83,6 +84,7 @@ contract Deploy is Script {
         uint256[] yes;
         uint256[] no;
         bytes32[] cond;
+        uint256 maxSize; // USDC, 0 = none
     }
 
     function run() external {
@@ -170,12 +172,11 @@ contract Deploy is Script {
         d.pm.setKeeper(keeper, true);
         d.pool.setManager(address(d.pm));
         if (keeperVenue) KeeperVenue(address(d.venue)).setCaller(address(d.pm), true);
-        d.pm.setRedeemer(ICtfRedeemer(mainnet ? vm.envAddress("POLY_CTF_ADAPTER") : address(mockCtf)));
+        d.pm.setRedeemer(ICtfRedeemer(mainnet ? vm.envAddress("POLY_CTF") : address(mockCtf)));
         d.pm.setGuardian(keeper, true);
         d.pool.setGuardian(keeper, true);
         if (mainnet) {
             d.pool.setDepositCaps(vm.envOr("SENIOR_CAP_USD", uint256(200)) * USD, vm.envOr("JUNIOR_CAP_USD", uint256(100)) * USD);
-            d.oracle.setStepLimit(0.1e18, 30);
         }
 
         d.oracle.setUpdater(keeper, true);
@@ -183,6 +184,7 @@ contract Deploy is Script {
         if (mainnet && bytes(vm.envOr("MARKET_MAX_POSITION", string(""))).length == 0) {
             for (uint256 i; i < mk.maxPos.length; ++i) mk.maxPos[i] = 30;
         }
+        if (mainnet) mk.maxSize = vm.envOr("MAX_POSITION_SIZE_USD", uint256(40)) * USD;
         _listMarkets(d, mk, borrowCap);
 
         if (mainnet) {
@@ -239,6 +241,11 @@ contract Deploy is Script {
                 uint256[] memory pair = new uint256[](2);
                 (pair[0], pair[1]) = (mk.yes[i], mk.no[i]);
                 d.risk.setMaxPositionBorrow(pair, mk.maxPos[i] * USD);
+            }
+            if (mk.maxSize > 0) {
+                uint256[] memory pair = new uint256[](2);
+                (pair[0], pair[1]) = (mk.yes[i], mk.no[i]);
+                d.risk.setMaxPositionSize(pair, mk.maxSize);
             }
             d.oracle.setComplement(mk.no[i], mk.yes[i]); // NO = 1 - YES: one stored feed per market
             d.oracle.setPrice(mk.yes[i], mk.px[i] * 1e12);

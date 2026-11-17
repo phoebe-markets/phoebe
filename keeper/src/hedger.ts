@@ -3,11 +3,15 @@
  * Market maker / hedger for KeeperVenue on Polygon mainnet (Path B, NOTES.md).
  *
  * The protocol trades against this wallet's inventory at oracle +/- spread. The wallet stays roughly market-neutral:
- *   - Inventory is stocked WITHOUT trading: the CtfCollateralAdapter splits pUSD into equal YES + NO shares (and
- *     merges pairs back). Holding YES and NO in equal amounts is flat: worth exactly $1 per pair whatever happens.
+ *   - Inventory is stocked WITHOUT trading: the CTF splits USDC.e (the pool asset, and the CTF's own collateral)
+ *     into equal YES + NO shares, and merges pairs back. Holding YES and NO in equal amounts is flat: worth exactly
+ *     $1 per pair whatever happens.
  *   - When the protocol buys YES from us (a trader opens a YES long), we're left long NO. Exposure = YES - NO shares.
- *     Once |exposure| passes a band, flatten it on the Polymarket CLOB: BUY the short side (or, if pUSD is short,
+ *     Once |exposure| passes a band, flatten it on the Polymarket CLOB: BUY the short side (or, if cash is short,
  *     SELL the long side), FOK, at most `slippage` worse than the top of book.
+ *   - Two cash balances, one pool: the venue and liquidations use USDC.e; Polymarket's exchange settles in pUSD.
+ *     pUSD is wrapped from USDC.e just before a CLOB buy, and USDC.e is unwrapped from pUSD when a split or the
+ *     USDC.e reserve (venue buybacks, liquidation repayments) needs it. Both ramps are Polymarket's, 1:1.
  *   - If Polymarket is unreachable, we're geoblocked, or unhedged exposure is over the limit, the venue is switched
  *     off (KeeperVenue.setActive(false), callable by the maker) so the protocol stops trading against stale risk.
  *
@@ -15,30 +19,37 @@
  * transactions never race on nonces). This file is also a CLI for setup and manual operations:
  *
  *   DEPLOYMENT=polygon RPC_URL=... KEEPER_PK=... bun keeper/src/hedger.ts status
- *   ... hedger.ts setup --yes                # approve pUSD + CTF to the exchange and the adapter
- *   ... hedger.ts split <market> <usd> --yes # pUSD -> YES + NO inventory
+ *   ... hedger.ts setup --yes                # approvals: exchange (pUSD, outcome tokens), CTF and ramps
+ *   ... hedger.ts split <market> <usd> --yes # USDC.e -> YES + NO inventory
  *   ... hedger.ts merge <market> <shares|all> --yes
  *   ... hedger.ts unwrap <usd> --yes         # pUSD -> USDC.e (offramp)
  *   ... hedger.ts tick [--live]              # one hedging pass; without --live it only logs what it would do
  *   ... hedger.ts geo                        # what Polymarket sees (country, blocked?)
  *   --ssh <host> / --socks <host:port> route Polymarket API traffic (see polymarket.ts)
  *
- * Limits (env, defaults for the low-dollar launch): HEDGE_BAND_SHARES 5, HEDGE_SLIPPAGE 0.02, HEDGE_MAX_ORDER_USD 25,
- * HEDGE_DAILY_CAP_USD 200, INVENTORY_TARGET_SHARES 60, INVENTORY_FLOOR_SHARES 25, PUSD_RESERVE_USD 40,
- * MAX_EXPOSURE_USD 40, HEDGE_COOLDOWN_SECONDS 120.
+ * Limits (env). Defaults follow from the deploy's MAX_POSITION_SIZE_USD (40: margin + borrow per position):
+ *   HEDGE_MAX_ORDER_USD 60    one order flattens one max-size trade: buying back the shares a $40 trade took costs
+ *                             about $40 * (price + slippage) / price, i.e. ~$43 at a 0.275 market
+ *   MAX_EXPOSURE_USD 60       unhedged exposure (no hedge in flight) above this switches the venue off
+ *   INVENTORY_TARGET_SHARES 150 / INVENTORY_FLOOR_SHARES 75   per side; a $40 trade at a 0.275 market takes ~145
+ *                             shares, so the floor covers one max trade with no restock in between
+ *   CASH_RESERVE_USD 60       USDC.e kept for venue buybacks (a trader closing) and liquidation repayments
+ *   HEDGE_DAILY_CAP_USD 500   runaway-loop breaker: ~6 max-size round trips a day
+ *   HEDGE_BAND_SHARES 5, HEDGE_SLIPPAGE 0.02, HEDGE_COOLDOWN_SECONDS 120 (wait for a fill to settle on-chain)
  */
 import { formatUnits, maxUint256, parseUnits, type Address, type Hex } from "viem";
 import { OrderType, Side, type ClobClient, type OrderBookSummary } from "@polymarket/clob-client-v2";
 import { ABI_EXTRA, alert, clients, loadDeployment, log, noId, send, yesId, type Clients, type Deployment } from "./config";
 import {
-  ADAPTER_ABI,
   CTF_ABI,
-  CTF_ADAPTER,
   ERC20_ABI,
   EXCHANGE_V2,
   OFFRAMP,
+  ONRAMP,
   PARTITION,
+  PUSD,
   RAMP_ABI,
+  SPLIT_ABI,
   USDCE,
   clobClient,
   depthTo,
@@ -70,12 +81,12 @@ export function configFromEnv(live: boolean): HedgerConfig {
     live,
     bandShares: env("HEDGE_BAND_SHARES", 5),
     slippage: env("HEDGE_SLIPPAGE", 0.02),
-    maxOrderUsd: env("HEDGE_MAX_ORDER_USD", 25),
-    dailyCapUsd: env("HEDGE_DAILY_CAP_USD", 200),
-    targetShares: env("INVENTORY_TARGET_SHARES", 60),
-    floorShares: env("INVENTORY_FLOOR_SHARES", 25),
-    reserveUsd: env("PUSD_RESERVE_USD", 40),
-    maxExposureUsd: env("MAX_EXPOSURE_USD", 40),
+    maxOrderUsd: env("HEDGE_MAX_ORDER_USD", 60),
+    dailyCapUsd: env("HEDGE_DAILY_CAP_USD", 500),
+    targetShares: env("INVENTORY_TARGET_SHARES", 150),
+    floorShares: env("INVENTORY_FLOOR_SHARES", 75),
+    reserveUsd: env("CASH_RESERVE_USD", 60),
+    maxExposureUsd: env("MAX_EXPOSURE_USD", 60),
     cooldownMs: env("HEDGE_COOLDOWN_SECONDS", 120) * 1000,
   };
 }
@@ -104,7 +115,7 @@ function toTick(p: number, tick: string, up: boolean) {
 }
 
 /**
- * Pure decision: how to flatten one market's exposure given books, free pUSD and remaining caps. Exported for tests.
+ * Pure decision: how to flatten one market's exposure given books, free cash and remaining caps. Exported for tests.
  * Returns undefined when inside the band or when the capped size is below the book's minimum.
  */
 export function planHedge(
@@ -120,7 +131,7 @@ export function planHedge(
   const shortBook = short === "YES" ? m.yesBook : m.noBook;
   const longBook = long === "YES" ? m.yesBook : m.noBook;
 
-  // Prefer buying the short side (keeps both inventories stocked); sell the long side if pUSD is tight.
+  // Prefer buying the short side (keeps both inventories stocked); sell the long side if cash is tight.
   const st = topOfBook(shortBook);
   const buyLimit = toTick(st.ask + cfg.slippage, st.tick, true);
   let shares = Math.min(Math.abs(exposure), cfg.maxOrderUsd / buyLimit, capUsd / buyLimit, depthTo(shortBook, "BUY", buyLimit));
@@ -144,7 +155,8 @@ export class Hedger {
   private extra = ABI_EXTRA();
   private planned = new Set<number>(); // dry run: markets with a hedge we only logged
   private dryLogged = new Map<string, number>();
-  readonly adapter: Address;
+  /** Real Polymarket (mainnet): CLOB orders settle in pUSD, so cash moves between USDC.e and pUSD. */
+  readonly mainnet: boolean;
 
   constructor(
     private c: Clients,
@@ -152,7 +164,10 @@ export class Hedger {
     readonly cfg: HedgerConfig,
   ) {
     if (!d.tokenIds || !d.conditionIds) throw new Error("deployment has no tokenIds/conditionIds (redeploy with the current script)");
-    this.adapter = d.mockCtf === false ? CTF_ADAPTER : d.ctf; // MockCTF plays the adapter on testnets
+    this.mainnet = d.mockCtf === false;
+    if (this.mainnet && d.usdc.toLowerCase() !== USDCE.toLowerCase()) {
+      throw new Error(`pool asset ${d.usdc} isn't USDC.e: the hedger splits on the CTF, which only takes USDC.e`);
+    }
   }
 
   /** Dry-run log line, repeated at most every 10 minutes. */
@@ -177,8 +192,37 @@ export class Hedger {
     return this.spent.usd;
   }
 
-  async pusd() {
-    return (await this.c.pub.readContract({ address: this.d.usdc, abi: ERC20_ABI, functionName: "balanceOf", args: [this.me] })) as bigint;
+  private bal(token: Address) {
+    return this.c.pub.readContract({ address: token, abi: ERC20_ABI, functionName: "balanceOf", args: [this.me] }) as Promise<bigint>;
+  }
+
+  /** Pool asset (USDC.e) and CLOB cash (pUSD; always 0 off mainnet). */
+  async cash() {
+    const [usdc, pusd] = await Promise.all([this.bal(this.d.usdc), this.mainnet ? this.bal(PUSD) : 0n]);
+    return { usdc, pusd };
+  }
+
+  /** Make sure `usd` of pUSD is on hand for a CLOB buy, wrapping USDC.e as needed. */
+  private async ensurePusd(usd: number) {
+    const need = u6(usd) - (await this.bal(PUSD));
+    if (need <= 0n) return;
+    const amt = need + 10_000n; // a cent of slack for rounding in the order amount
+    await this.ensureErc20(USDCE, ONRAMP, "USDC.e", "onramp");
+    await send(this.c, { address: ONRAMP, abi: RAMP_ABI, functionName: "wrap", args: [USDCE, this.me, amt] });
+    log(`hedger: wrapped ${formatUnits(amt, 6)} USDC.e -> pUSD`);
+  }
+
+  /** Make sure `amt` of USDC.e is on hand, unwrapping pUSD (CLOB proceeds) as needed. Returns false if it can't. */
+  private async ensureUsdce(amt: bigint, pusdAvailable?: bigint) {
+    const need = amt - (await this.bal(USDCE));
+    if (need <= 0n) return true;
+    const pusd = pusdAvailable ?? (await this.bal(PUSD));
+    const take = need < pusd ? need : pusd;
+    if (take <= 0n) return false;
+    await this.ensureErc20(PUSD, OFFRAMP, "pUSD", "offramp");
+    await send(this.c, { address: OFFRAMP, abi: RAMP_ABI, functionName: "unwrap", args: [USDCE, this.me, take] });
+    log(`hedger: unwrapped ${formatUnits(take, 6)} pUSD -> USDC.e`);
+    return take === need;
   }
 
   async markets(): Promise<Market[]> {
@@ -208,7 +252,8 @@ export class Hedger {
       const g = await geoblock();
       if (g.blocked) problems.push(`Polymarket geoblocks this egress (${g.country ?? "?"})`);
       ms = await this.markets();
-      free = n6(await this.pusd()) - this.cfg.reserveUsd;
+      const b = await this.cash();
+      free = n6(b.usdc + b.pusd) - this.cfg.reserveUsd;
     } catch (e) {
       problems.push(`Polymarket unreachable: ${(e as Error).message.split("\n")[0]}`);
     }
@@ -220,14 +265,21 @@ export class Hedger {
         free -= spent;
         // balances lag a CLOB fill until Polymarket settles it on-chain: don't restock on stale numbers
         if (!pending && spent === 0 && !this.planned.has(m.i)) free -= await this.restock(m, free);
+        // Balances above are from before this pass's order: exposure only counts as unhedged when no hedge is in
+        // flight (a failed order sets no cooldown, so it does count).
         const exposureUsd = Math.abs(n6(m.Y - m.N)) * (m.Y < m.N ? m.mid : 1 - m.mid);
-        if (exposureUsd > this.cfg.maxExposureUsd) problems.push(`market ${m.i}: unhedged exposure ${usd(exposureUsd)}`);
+        const hedging = pending || spent !== 0 || this.planned.has(m.i);
+        if (!hedging && exposureUsd > this.cfg.maxExposureUsd) problems.push(`market ${m.i}: unhedged exposure ${usd(exposureUsd)}`);
+      }
+      if (this.cfg.live && this.mainnet) {
+        // keep the USDC.e reserve topped up from CLOB proceeds
+        await this.ensureUsdce(u6(this.cfg.reserveUsd)).catch((e) => log(`hedger: reserve top-up failed: ${(e as Error).message.split("\n")[0]}`));
       }
     }
     await this.setVenue(problems.length === 0, problems);
   }
 
-  /** Returns pUSD spent. */
+  /** Returns cash spent (negative for proceeds); 0 when nothing was placed. */
   private async hedge(m: Market, free: number) {
     this.planned.delete(m.i);
     const cap = this.cfg.dailyCapUsd - this.spentToday();
@@ -241,6 +293,7 @@ export class Hedger {
       this.dry(what);
       return 0;
     }
+    if (plan.side === "BUY" && this.mainnet) await this.ensurePusd(plan.usd);
     const t = topOfBook(book);
     const res = await this.clob!.createAndPostMarketOrder(
       {
@@ -263,14 +316,14 @@ export class Hedger {
     return plan.side === "BUY" ? plan.usd : -plan.usd;
   }
 
-  /** Split pUSD into pairs when either side runs low; merge when both run high. Returns pUSD spent. */
+  /** Split USDC.e into pairs when either side runs low; merge when both run high. Returns cash spent. */
   private async restock(m: Market, free: number) {
     const low = n6(m.Y < m.N ? m.Y : m.N);
     if (low < this.cfg.floorShares) {
       const want = this.cfg.targetShares - low;
       const amt = Math.min(want, Math.max(free, 0));
       if (amt < 1) {
-        log(`hedger: market ${m.i} inventory low (${low.toFixed(1)} sh/side) and no free pUSD to split; fund the maker`);
+        log(`hedger: market ${m.i} inventory low (${low.toFixed(1)} sh/side) and no free cash to split; fund the maker`);
         return 0;
       }
       await this.split(m.i, amt);
@@ -285,12 +338,13 @@ export class Hedger {
   }
 
   async split(i: number, amountUsd: number) {
-    const what = `split ${usd(amountUsd)} pUSD into market ${i} YES + NO`;
+    const what = `split ${usd(amountUsd)} USDC.e into market ${i} YES + NO`;
     if (!this.cfg.live) return this.dry(what);
-    await this.ensureErc20(this.d.usdc, this.adapter, "adapter");
+    if (this.mainnet && !(await this.ensureUsdce(u6(amountUsd)))) throw new Error(`not enough USDC.e + pUSD to ${what}`);
+    await this.ensureErc20(this.d.usdc, this.d.ctf, "USDC.e", "CTF");
     await send(this.c, {
-      address: this.adapter,
-      abi: ADAPTER_ABI,
+      address: this.d.ctf,
+      abi: SPLIT_ABI,
       functionName: "splitPosition",
       args: [this.d.usdc, `0x${"0".repeat(64)}`, this.d.conditionIds![i], PARTITION, u6(amountUsd)],
     });
@@ -298,12 +352,11 @@ export class Hedger {
   }
 
   async merge(i: number, shares: number) {
-    const what = `merge ${shares.toFixed(2)} market ${i} YES + NO pairs into pUSD`;
+    const what = `merge ${shares.toFixed(2)} market ${i} YES + NO pairs into USDC.e`;
     if (!this.cfg.live) return this.dry(what);
-    await this.ensureCtfApproval(this.adapter, "adapter");
     await send(this.c, {
-      address: this.adapter,
-      abi: ADAPTER_ABI,
+      address: this.d.ctf,
+      abi: SPLIT_ABI,
       functionName: "mergePositions",
       args: [this.d.usdc, `0x${"0".repeat(64)}`, this.d.conditionIds![i], PARTITION, u6(shares)],
     });
@@ -324,20 +377,22 @@ export class Hedger {
     log(`hedger: ${what}${on ? "" : " -- the protocol can't open or close until this clears"}`);
   }
 
-  /** Approvals the CLOB (exchange) and the adapter need. */
+  /** Approvals: the exchange (pUSD in, outcome tokens out), the CTF (USDC.e for splits) and both ramps. */
   async setup() {
-    await this.ensureErc20(this.d.usdc, EXCHANGE_V2, "exchange");
+    await this.ensureErc20(this.d.usdc, this.d.ctf, "USDC.e", "CTF");
+    if (!this.mainnet) return;
+    await this.ensureErc20(PUSD, EXCHANGE_V2, "pUSD", "exchange");
     await this.ensureCtfApproval(EXCHANGE_V2, "exchange");
-    await this.ensureErc20(this.d.usdc, this.adapter, "adapter");
-    await this.ensureCtfApproval(this.adapter, "adapter");
+    await this.ensureErc20(USDCE, ONRAMP, "USDC.e", "onramp");
+    await this.ensureErc20(PUSD, OFFRAMP, "pUSD", "offramp");
   }
 
-  private async ensureErc20(token: Address, spender: Address, label: string) {
+  private async ensureErc20(token: Address, spender: Address, sym: string, label: string) {
     const a = (await this.c.pub.readContract({ address: token, abi: ERC20_ABI, functionName: "allowance", args: [this.me, spender] })) as bigint;
     if (a >= maxUint256 / 2n) return;
-    if (!this.cfg.live) return this.dry(`approve pUSD to the ${label}`);
+    if (!this.cfg.live) return this.dry(`approve ${sym} to the ${label}`);
     await send(this.c, { address: token, abi: ERC20_ABI, functionName: "approve", args: [spender, maxUint256] });
-    log(`hedger: approved pUSD to the ${label}`);
+    log(`hedger: approved ${sym} to the ${label}`);
   }
 
   private async ensureCtfApproval(op: Address, label: string) {
@@ -349,13 +404,16 @@ export class Hedger {
   }
 
   async status() {
-    const [ms, p, pol, active] = await Promise.all([
+    const [ms, b, pol, active] = await Promise.all([
       this.markets(),
-      this.pusd(),
+      this.cash(),
       this.c.pub.getBalance({ address: this.me }),
       this.c.pub.readContract({ address: this.d.venue, abi: this.extra.keeperVenue, functionName: "active" }),
     ]);
-    console.log(`maker ${this.me}: ${formatUnits(p, 6)} pUSD, ${formatUnits(pol, 18)} POL, venue ${active ? "ACTIVE" : "inactive"}`);
+    console.log(
+      `maker ${this.me}: ${formatUnits(b.usdc, 6)} USDC.e, ${formatUnits(b.pusd, 6)} pUSD, ${formatUnits(pol, 18)} POL, ` +
+        `venue ${active ? "ACTIVE" : "inactive"}`,
+    );
     for (const m of ms) {
       const y = topOfBook(m.yesBook);
       console.log(
@@ -408,7 +466,7 @@ if (import.meta.main) {
         log(`[dry run] would unwrap ${pos[0]} pUSD to USDC.e (add --yes)`);
         break;
       }
-      await send(c, { address: d.usdc, abi: ERC20_ABI, functionName: "approve", args: [OFFRAMP, amt] });
+      await send(c, { address: PUSD, abi: ERC20_ABI, functionName: "approve", args: [OFFRAMP, amt] });
       await send(c, { address: OFFRAMP, abi: RAMP_ABI, functionName: "unwrap", args: [USDCE, c.account.address, amt] });
       log(`unwrapped ${pos[0]} pUSD to USDC.e`);
       break;

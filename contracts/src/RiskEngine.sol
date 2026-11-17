@@ -51,6 +51,9 @@ contract RiskEngine is Ownable {
     /// @notice Max borrow per position (USDC, 0 = unlimited). Size positions so a liquidation stays profitable after
     ///         price impact: in thin books, liquidators won't take positions that are big relative to daily volume.
     mapping(uint256 => uint256) public maxPositionBorrow;
+    /// @notice Max position size, margin + borrow (USDC, 0 = unlimited). With a hedging market maker (KeeperVenue),
+    ///         this bounds the exposure one trade hands the maker, so one hedge order can always flatten it.
+    mapping(uint256 => uint256) public maxPositionSize;
     PriceBands public bands;
     mapping(address => bool) public guardians;
 
@@ -70,6 +73,7 @@ contract RiskEngine is Ownable {
     event ClusterSet(uint256 indexed tokenId, uint32 indexed cluster);
     event ClusterCapSet(uint32 indexed cluster, uint256 cap);
     event MaxPositionBorrowSet(uint256 indexed tokenId, uint256 amount);
+    event MaxPositionSizeSet(uint256 indexed tokenId, uint256 amount);
 
     error BadConfig();
     error NotGuardian();
@@ -116,6 +120,13 @@ contract RiskEngine is Ownable {
         for (uint256 i; i < tokenIds.length; ++i) {
             maxPositionBorrow[tokenIds[i]] = amount;
             emit MaxPositionBorrowSet(tokenIds[i], amount);
+        }
+    }
+
+    function setMaxPositionSize(uint256[] calldata tokenIds, uint256 amount) external onlyOwner {
+        for (uint256 i; i < tokenIds.length; ++i) {
+            maxPositionSize[tokenIds[i]] = amount;
+            emit MaxPositionSizeSet(tokenIds[i], amount);
         }
     }
 

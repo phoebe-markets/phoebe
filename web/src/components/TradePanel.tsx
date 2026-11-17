@@ -28,6 +28,10 @@ export function TradePanel({ m, snap, side, setSide, onOpen }: Props) {
   let borrow = margin * (levX - 1);
   const capped = s.maxPositionBorrow > 0 && borrow > s.maxPositionBorrow;
   if (capped) borrow = s.maxPositionBorrow;
+  // per-position size cap (margin + borrow): borrow shrinks to fit; margin alone over the cap blocks the open
+  const sizeCapped = s.maxPositionSize > 0 && margin + borrow > s.maxPositionSize;
+  if (sizeCapped) borrow = Math.max(0, s.maxPositionSize - margin);
+  const marginTooBig = s.maxPositionSize > 0 && margin > s.maxPositionSize;
   const notional = margin + borrow;
   const fill = s.price * (1 + snap.status.venueSpread); // the venue fills at oracle + spread
   const shares = fill > 0 ? notional / fill : 0;
@@ -37,7 +41,7 @@ export function TradePanel({ m, snap, side, setSide, onOpen }: Props) {
   const liqPrice = shares > 0 && s.liqLtv > 0 ? borrow / (shares * s.liqLtv) : NaN;
   const resolved = s.price <= 0 || s.price >= 1; // nothing left to buy: the outcome is decided
   const halted = snap.status.pmPaused || !snap.status.venueActive;
-  const canOpen = s.openAllowed && !resolved && !halted && margin > 0 && margin + fee <= snap.account.usdc && ltv <= s.maxLtv;
+  const canOpen = s.openAllowed && !resolved && !halted && margin > 0 && !marginTooBig && margin + fee <= snap.account.usdc && ltv <= s.maxLtv;
 
   async function submit() {
     setBusy(true);
@@ -97,7 +101,10 @@ export function TradePanel({ m, snap, side, setSide, onOpen }: Props) {
         <div className="row"><span>Liquidation price today</span><span>{Number.isFinite(liqPrice) && borrow > 0 ? cents(liqPrice) : "—"}</span></div>
         <div className="row"><span>Opening fee ({snap.fees.openFeeBps / 100}% of borrow)</span><span>{usd(fee, 2)}</span></div>
       </div>
-      {capped && <div className="msg">Capped at this market's per-position borrow limit ({usd(s.maxPositionBorrow)}).</div>}
+      {capped && !sizeCapped && <div className="msg">Capped at this market's per-position borrow limit ({usd(s.maxPositionBorrow)}).</div>}
+      {sizeCapped && !marginTooBig && (
+        <div className="msg">Borrow reduced to fit the {usd(s.maxPositionSize)} position-size limit (margin + borrow).</div>
+      )}
       <div className="sub" style={{ marginBottom: 10 }}>
         The liquidation line moves with volatility and as resolution nears. Liquidation costs a {snap.fees.bonusBps / 100}% bonus
         (rising {snap.fees.rampPerHour / 100}%/h if nobody takes it) plus a {snap.fees.liqFeeBps / 100}% fee.
@@ -115,9 +122,11 @@ export function TradePanel({ m, snap, side, setSide, onOpen }: Props) {
             ? "Market maker offline, try shortly"
             : !s.openAllowed
               ? "Market closed to new positions"
+              : marginTooBig
+                ? `Max position size is ${usd(s.maxPositionSize)}`
               : margin + fee > snap.account.usdc
                 ? `Not enough ${CFG.asset}`
-                : `Open ${lev(levX)} long ${side}`}
+                : `Open ${lev(notional / margin)} long ${side}`}
       </button>
       {msg && <div className={`msg${msg.err ? " err" : ""}`}>{msg.text}</div>}
     </section>

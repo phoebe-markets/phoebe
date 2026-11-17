@@ -105,11 +105,12 @@ export async function settlePosition(w: Wallet, d: Deployment, abi: Abis, id: bi
   return write(w, d.positionManager, abi.pm, "settle", [id]);
 }
 
-// Polymarket's collateral on-ramp (Polygon): USDC.e -> pUSD, 1:1
+// Polymarket's collateral off-ramp (Polygon): pUSD -> USDC.e (the pool asset on mainnet), 1:1
 export const USDCE: Address = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174";
-const ONRAMP: Address = "0x93070a847efEf7F70739046A929D47a521F5B8ee";
-const ONRAMP_ABI = parseAbi([
-  "function wrap(address _asset, address _to, uint256 _amount)",
+export const PUSD: Address = "0xC011a7E12a19f7B1f670d46F03B03f3342E82DFB";
+const OFFRAMP: Address = "0x2957922Eb93258b93368531d39fAcCA3B4dC5854";
+const RAMP_ABI = parseAbi([
+  "function unwrap(address _asset, address _to, uint256 _amount)",
   "function paused(address asset) view returns (bool)",
   "error OnlyUnpaused()",
 ]);
@@ -119,18 +120,18 @@ const ERC20_ABI = parseAbi([
   "function approve(address,uint256) returns (bool)",
 ]);
 
-export async function usdceBalance(who: Address) {
-  return Number(await pub.readContract({ address: USDCE, abi: ERC20_ABI, functionName: "balanceOf", args: [who] })) / USD;
+export async function pusdBalance(who: Address) {
+  return Number(await pub.readContract({ address: PUSD, abi: ERC20_ABI, functionName: "balanceOf", args: [who] })) / USD;
 }
 
-export const onrampPaused = () => pub.readContract({ address: ONRAMP, abi: ONRAMP_ABI, functionName: "paused", args: [USDCE] });
+export const offrampPaused = () => pub.readContract({ address: OFFRAMP, abi: RAMP_ABI, functionName: "paused", args: [USDCE] });
 
-/** Wrap USDC.e into pUSD through Polymarket's on-ramp (pUSD is the pool asset on mainnet). */
-export async function wrapPusd(w: Wallet, amount: number) {
+/** Unwrap pUSD (Polymarket's trading balance) into USDC.e through Polymarket's off-ramp. */
+export async function unwrapPusd(w: Wallet, amount: number) {
   const amt = toUsdc(amount);
-  const a = (await pub.readContract({ address: USDCE, abi: ERC20_ABI, functionName: "allowance", args: [w.account.address, ONRAMP] })) as bigint;
-  if (a < amt) await write(w, USDCE, ERC20_ABI, "approve", [ONRAMP, amt]);
-  return write(w, ONRAMP, ONRAMP_ABI, "wrap", [USDCE, w.account.address, amt]);
+  const a = (await pub.readContract({ address: PUSD, abi: ERC20_ABI, functionName: "allowance", args: [w.account.address, OFFRAMP] })) as bigint;
+  if (a < amt) await write(w, PUSD, ERC20_ABI, "approve", [OFFRAMP, amt]);
+  return write(w, OFFRAMP, RAMP_ABI, "unwrap", [USDCE, w.account.address, amt]);
 }
 
 /** Testnet faucet: the mock USDC is freely mintable. */

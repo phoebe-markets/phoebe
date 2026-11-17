@@ -16,7 +16,6 @@ export const PUSD: Address = "0xC011a7E12a19f7B1f670d46F03B03f3342E82DFB";
 export const USDCE: Address = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174"; // bridged USDC.e (backs the CTF positions)
 export const USDC: Address = "0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359"; // native USDC
 export const CTF: Address = "0x4D97DCd97eC945f40cF65F87097ACe5EA0476045";
-export const CTF_ADAPTER: Address = "0xADa100874d00e3331D00F2007a9c336a65009718"; // split/merge/redeem in pUSD
 export const ONRAMP: Address = "0x93070a847efEf7F70739046A929D47a521F5B8ee"; // USDC(.e) -> pUSD
 export const OFFRAMP: Address = "0x2957922Eb93258b93368531d39fAcCA3B4dC5854"; // pUSD -> USDC(.e)
 export const EXCHANGE_V2: Address = "0xE111180000d2663C0091e4f400237545B87B996B";
@@ -33,11 +32,10 @@ export const CTF_ABI = parseAbi([
   "function setApprovalForAll(address,bool)",
   "function payoutDenominator(bytes32) view returns (uint256)",
 ]);
-/** CtfCollateralAdapter (and MockCTF on testnets): collateral/parent/partition args are ignored by the adapter. */
-export const ADAPTER_ABI = parseAbi([
+/** ConditionalTokens split/merge (MockCTF on testnets has the same signatures). */
+export const SPLIT_ABI = parseAbi([
   "function splitPosition(address collateralToken, bytes32 parentCollectionId, bytes32 conditionId, uint256[] partition, uint256 amount)",
   "function mergePositions(address collateralToken, bytes32 parentCollectionId, bytes32 conditionId, uint256[] partition, uint256 amount)",
-  "function paused(address asset) view returns (bool)",
 ]);
 export const RAMP_ABI = parseAbi([
   "function wrap(address _asset, address _to, uint256 _amount)",

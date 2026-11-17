@@ -257,8 +257,7 @@ contract PositionManager is ERC1155Holder, Ownable, ReentrancyGuard {
             pool.donate(fee);
         }
 
-        uint256 maxBorrow = risk.maxPositionBorrow(tokenId);
-        if (maxBorrow != 0 && borrowAmount > maxBorrow) revert PositionTooLarge();
+        _checkSize(tokenId, margin, borrowAmount);
 
         uint256 scaled;
         if (borrowAmount > 0) {
@@ -284,6 +283,13 @@ contract PositionManager is ERC1155Holder, Ownable, ReentrancyGuard {
         id = nextId++;
         positions[id] = Position({owner: msg.sender, tokenId: tokenId, shares: shares, scaledDebt: scaled});
         emit Opened(id, msg.sender, tokenId, margin, borrowAmount, shares);
+    }
+
+    function _checkSize(uint256 tokenId, uint256 margin, uint256 borrowAmount) internal view {
+        uint256 maxBorrow = risk.maxPositionBorrow(tokenId);
+        if (maxBorrow != 0 && borrowAmount > maxBorrow) revert PositionTooLarge();
+        uint256 maxSize = risk.maxPositionSize(tokenId);
+        if (maxSize != 0 && margin + borrowAmount > maxSize) revert PositionTooLarge();
     }
 
     /// @notice Repay part of the debt with fresh USDC (deleverage / move away from liquidation). Any excess is refunded.
@@ -491,9 +497,11 @@ contract PositionManager is ERC1155Holder, Ownable, ReentrancyGuard {
         if (ctf.balanceOf(address(this), t[0]) + ctf.balanceOf(address(this), t[1]) > 0) {
             uint256[] memory partition = new uint256[](2);
             (partition[0], partition[1]) = (1, 2);
-            ctf.setApprovalForAll(address(redeemer), true);
+            // the CTF redeems its own tokens; an adapter (e.g. one paying out in a wrapped asset) needs approval
+            bool adapter = address(redeemer) != address(ctf);
+            if (adapter) ctf.setApprovalForAll(address(redeemer), true);
             redeemer.redeemPositions(address(usdc), bytes32(0), conditionId, partition);
-            ctf.setApprovalForAll(address(redeemer), false);
+            if (adapter) ctf.setApprovalForAll(address(redeemer), false);
         }
         uint256 received = usdc.balanceOf(address(this)) - before;
 
