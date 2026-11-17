@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import type { Address } from "viem";
-import { CFG, pub, yesId, noId, type Abis, type Deployment } from "./chain";
+import { CFG, pub, yesId, noId, marketOf, type Abis, type Deployment } from "./chain";
 import { breakdown, type MarketParams, type RiskBreakdown, type RiskParams } from "./risk";
 
 const WAD = 1e18;
@@ -146,8 +146,11 @@ class EventStore {
     const a = l.args;
     const t = this.blockTime.get(l.blockNumber) ?? 0;
     const key = `${l.blockNumber}-${l.logIndex}`;
-    const side = (tokenId: bigint) => (tokenId % 2n === 1n ? "YES" : "NO");
-    const mkt = (tokenId: bigint) => this.d.names[Number((tokenId - 1n) / 2n)] ?? `market ${(tokenId - 1n) / 2n}`;
+    const side = (tokenId: bigint) => marketOf(this.d, tokenId)?.side ?? "?";
+    const mkt = (tokenId: bigint) => {
+      const m = marketOf(this.d, tokenId)?.market;
+      return m === undefined ? `token ${tokenId}` : (this.d.names[m] ?? `market ${m}`);
+    };
     const push = (kind: Activity["kind"], text: string, id?: bigint) => this.activity.push({ key, t, kind, id, text });
     switch (l.eventName) {
       case "Opened": {
@@ -220,7 +223,7 @@ async function loadParams(d: Deployment, abi: Abis) {
     r(d.risk, "risk", "jumpWad") as Promise<bigint>,
     r(d.risk, "risk", "volOracle") as Promise<Address>,
     Promise.all(
-      Array.from({ length: d.markets }, (_, i) => r(d.risk, "risk", "markets", [yesId(i)]) as Promise<readonly unknown[]>),
+      Array.from({ length: d.markets }, (_, i) => r(d.risk, "risk", "markets", [yesId(d, i)]) as Promise<readonly unknown[]>),
     ),
   ]);
   const riskParams: RiskParams = {
@@ -323,7 +326,7 @@ async function read(
 
   const marketsP = Promise.all(
     Array.from({ length: d.markets }, async (_, i) => {
-      const [yes, no] = await Promise.all([sideView(i, yesId(i)), sideView(i, noId(i))]);
+      const [yes, no] = await Promise.all([sideView(i, yesId(d, i)), sideView(i, noId(d, i))]);
       return { index: i, name: d.names?.[i] ?? `market ${i}`, resolutionTime: params.marketParams[i].resolutionTime, yes, no };
     }),
   );
@@ -375,8 +378,8 @@ async function read(
       const margin = n6(o.margin + (store.marginAdded.get(o.id) ?? 0n)); // all USDC the trader put in
       return {
         id: o.id,
-        market: Number((o.tokenId - 1n) / 2n),
-        side: o.tokenId % 2n === 1n ? "YES" : "NO",
+        market: marketOf(d, o.tokenId)?.market ?? -1,
+        side: marketOf(d, o.tokenId)?.side ?? "YES",
         tokenId: o.tokenId,
         shares: n6(o.shares),
         margin,
@@ -413,8 +416,8 @@ async function read(
 
   // History: rebuild each market's leverage limit at every oracle update from (price, sigma, time).
   const history = Array.from({ length: d.markets }, (_, i) => {
-    const ys = store.prices.get(yesId(i)) ?? [];
-    const ns = store.prices.get(noId(i)) ?? [];
+    const ys = store.prices.get(yesId(d, i)) ?? [];
+    const ns = store.prices.get(noId(d, i)) ?? [];
     const mp = params.marketParams[i];
     return ys.map(([t, p, s], k) => {
       const nsK = ns[k] ?? [t, 1 - p, s];

@@ -21,6 +21,10 @@ export type Deployment = {
   deployBlock?: number;
   venueType?: "mock" | "keeper";
   polyTokenIds?: string[];
+  tokenIds?: string[]; // YES, NO per market (decimal strings)
+  conditionIds?: Hex[];
+  marketSlugs?: string[];
+  mockCtf?: boolean;
   usdc: Address;
   ctf: Address;
   oracle: Address;
@@ -135,6 +139,18 @@ export async function loadProtocol(): Promise<{ d: Deployment; abi: Abis }> {
   };
 }
 
-/** Market i trades tokens 2i+1 (YES) and 2i+2 (NO). */
-export const yesId = (i: number) => BigInt(2 * i + 1);
-export const noId = (i: number) => BigInt(2 * i + 2);
+/**
+ * Market i's YES / NO token ids. Deployments list them in `tokenIds` (YES, NO per market; Polymarket's 256-bit ids on
+ * mainnet). Older mock deployments without it use 2i+1 / 2i+2.
+ */
+export const yesId = (d: { tokenIds?: string[] }, i: number) => (d.tokenIds ? BigInt(d.tokenIds[2 * i]) : BigInt(2 * i + 1));
+export const noId = (d: { tokenIds?: string[] }, i: number) => (d.tokenIds ? BigInt(d.tokenIds[2 * i + 1]) : BigInt(2 * i + 2));
+
+/** Which market and side a token id belongs to (undefined if it isn't listed). */
+export function marketOf(d: { tokenIds?: string[]; markets: number }, tokenId: bigint): { market: number; side: "YES" | "NO" } | undefined {
+  for (let i = 0; i < d.markets; i++) {
+    if (yesId(d, i) === tokenId) return { market: i, side: "YES" };
+    if (noId(d, i) === tokenId) return { market: i, side: "NO" };
+  }
+  return undefined;
+}

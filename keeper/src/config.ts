@@ -2,7 +2,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { createPublicClient, createTestClient, createWalletClient, http, type Abi, type Address } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
-import { foundry, polygonAmoy } from "viem/chains";
+import { foundry, polygon, polygonAmoy } from "viem/chains";
 
 const ROOT = join(import.meta.dir, "..", "..");
 
@@ -13,6 +13,9 @@ export type Deployment = {
   venueType?: "mock" | "keeper";
   complementNo?: boolean; // oracle derives NO = 1 - YES; push YES only
   polyTokenIds?: string[];
+  tokenIds?: string[]; // YES, NO per market (decimal strings)
+  conditionIds?: `0x${string}`[];
+  mockCtf?: boolean;
   deployBlock?: number;
   usdc: Address;
   ctf: Address;
@@ -57,7 +60,7 @@ const ANVIL_KEEPER_PK = "0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f46
 
 export function clients(rpcUrl = process.env.RPC_URL ?? "http://127.0.0.1:8545", chainId = 31337) {
   const account = privateKeyToAccount((process.env.KEEPER_PK ?? ANVIL_KEEPER_PK) as `0x${string}`);
-  const chain = chainId === polygonAmoy.id ? polygonAmoy : foundry;
+  const chain = chainId === polygon.id ? polygon : chainId === polygonAmoy.id ? polygonAmoy : foundry;
   const transport = http(rpcUrl, { batch: { batchSize: 50, wait: 0 } }); // JSON-RPC batching for sweeps
   return {
     account,
@@ -72,9 +75,21 @@ export const LOG_CHUNK = BigInt(process.env.LOG_CHUNK ?? 2000);
 
 export type Clients = ReturnType<typeof clients>;
 
-/** Market i trades tokens 2i+1 (YES) and 2i+2 (NO). */
-export const yesId = (i: number) => BigInt(2 * i + 1);
-export const noId = (i: number) => BigInt(2 * i + 2);
+/**
+ * Market i's YES / NO token ids. Deployments list them in `tokenIds` (YES, NO per market; Polymarket's 256-bit ids on
+ * mainnet). Older mock deployments without it use 2i+1 / 2i+2.
+ */
+export const yesId = (d: { tokenIds?: string[] }, i: number) => (d.tokenIds ? BigInt(d.tokenIds[2 * i]) : BigInt(2 * i + 1));
+export const noId = (d: { tokenIds?: string[] }, i: number) => (d.tokenIds ? BigInt(d.tokenIds[2 * i + 1]) : BigInt(2 * i + 2));
+
+/** Which market and side a token id belongs to (undefined if it isn't listed). */
+export function marketOf(d: { tokenIds?: string[]; markets: number }, tokenId: bigint): { market: number; side: "YES" | "NO" } | undefined {
+  for (let i = 0; i < d.markets; i++) {
+    if (yesId(d, i) === tokenId) return { market: i, side: "YES" };
+    if (noId(d, i) === tokenId) return { market: i, side: "NO" };
+  }
+  return undefined;
+}
 
 export const WAD = 10n ** 18n;
 export const fmtUsd = (x: bigint) => `$${(Number(x) / 1e6).toLocaleString("en-US", { maximumFractionDigits: 0 })}`;

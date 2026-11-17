@@ -66,10 +66,10 @@ export async function pushPrices(c: Clients, d: Deployment, prices: (bigint | un
   const px: bigint[] = [];
   prices.forEach((p, i) => {
     if (p === undefined) return;
-    ids.push(yesId(i));
+    ids.push(yesId(d, i));
     px.push(p);
     if (!d.complementNo) {
-      ids.push(noId(i));
+      ids.push(noId(d, i));
       px.push(WAD - p);
     }
   });

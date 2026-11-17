@@ -30,7 +30,7 @@ export class DemoTraders {
   async step(tick: number) {
     await this.closeExpired(tick);
     const m = this.side % this.d.markets;
-    const tokenId = Math.floor(this.side / this.d.markets) % 2 === 0 ? yesId(m) : noId(m);
+    const tokenId = Math.floor(this.side / this.d.markets) % 2 === 0 ? yesId(this.d, m) : noId(this.d, m);
     this.side++;
 
     const [price] = (await this.read(this.d.oracle, ABI.oracle, "getPrice", [tokenId])) as [bigint, bigint];

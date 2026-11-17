@@ -36,7 +36,7 @@ export class Maker {
   async restock() {
     const me = this.c.account.address;
     for (let i = 0; i < this.d.markets; i++) {
-      for (const id of [yesId(i), noId(i)]) {
+      for (const id of [yesId(this.d, i), noId(this.d, i)]) {
         const bal = (await this.read(this.d.ctf, this.extra.ctf, "balanceOf", [me, id])) as bigint;
         if (bal < this.targetShares / 2n) {
           await this.write(this.d.ctf, this.extra.ctf, "mint", [me, id, this.targetShares - bal], `restock token ${id}`);
