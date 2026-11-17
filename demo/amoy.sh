@@ -24,12 +24,12 @@ case "${1:-}" in
     set -a; . "$root/deployments/amoy-markets.env"; set +a
     cd "$root/contracts"
     DEPLOYMENT=amoy VENUE=keeper KEEPER_ADDR=$kpr_addr DEPLOYER_PK=$(cat ~/.phoebe/amoy-deployer.key) \
-      forge script script/Deploy.s.sol --rpc-url "$rpc" --broadcast --slow
+      forge script script/Deploy.s.sol --rpc-url "$rpc" --broadcast --slow --with-gas-price 30gwei --priority-gas-price 30gwei
     echo "-> deployments/amoy.json"
     ;;
   keeper)
     DEPLOYMENT=amoy RPC_URL=$rpc KEEPER_PK=$(cat ~/.phoebe/amoy-keeper.key) \
-      exec bun "$root/keeper/src/main.ts" live --interval "${INTERVAL:-60}" --min-move "${MIN_MOVE:-0.003}" --heartbeat "${HEARTBEAT:-1500}"
+      exec bun "$root/keeper/src/main.ts" live --interval "${INTERVAL:-60}" --min-move "${MIN_MOVE:-0.003}" --heartbeat "${HEARTBEAT:-3300}"
     ;;
   *) sed -n '2,9p' "$0"; exit 1 ;;
 esac

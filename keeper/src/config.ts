@@ -11,6 +11,7 @@ export type Deployment = {
   markets: number;
   names?: string[];
   venueType?: "mock" | "keeper";
+  complementNo?: boolean; // oracle derives NO = 1 - YES; push YES only
   polyTokenIds?: string[];
   deployBlock?: number;
   usdc: Address;

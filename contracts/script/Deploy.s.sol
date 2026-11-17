@@ -82,7 +82,7 @@ contract Deploy is Script {
         d.oracle = new KeeperOracle();
         if (keeperVenue) {
             KeeperVenue kv = new KeeperVenue(IERC20(address(d.usdc)), IERC1155(address(d.ctf)), d.oracle, keeper);
-            kv.setParams(50, 30 minutes); // 0.5% spread; the keeper's live heartbeat (25 min) keeps prices fresher than this
+            kv.setParams(50, 1 hours); // 0.5% spread; the keeper's live heartbeat (55 min) keeps prices fresher than this
             d.venue = kv;
             // testnet stand-in for "the keeper buys shares on Polymarket": it may mint mock outcome tokens
             d.ctf.setMinter(keeper, true);
@@ -131,8 +131,8 @@ contract Deploy is Script {
                 (pair[0], pair[1]) = (2 * i + 1, 2 * i + 2);
                 d.risk.setMaxPositionBorrow(pair, maxPos[i] * USD);
             }
+            d.oracle.setComplement(2 * i + 2, 2 * i + 1); // NO = 1 - YES: one stored feed per market
             d.oracle.setPrice(2 * i + 1, px[i] * 1e12);
-            d.oracle.setPrice(2 * i + 2, 1e18 - px[i] * 1e12);
         }
 
         d.usdc.mint(keeper, 1_000_000 * USD); // liquidation capital + (keeper venue) buyback float
@@ -186,6 +186,7 @@ contract Deploy is Script {
         string memory k = "deploy";
         string memory name = vm.envOr("DEPLOYMENT", string("local"));
         vm.serializeString(k, "venueType", keeperVenue ? "keeper" : "mock");
+        vm.serializeBool(k, "complementNo", true);
         vm.serializeString(k, "polyTokenIds", vm.envOr("POLY_TOKEN_IDS", ",", new string[](0)));
         vm.serializeUint(k, "deployBlock", block.number);
         vm.serializeUint(k, "chainId", block.chainid);

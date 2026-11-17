@@ -72,3 +72,35 @@ contract VolatilityTest is Base {
         }
     }
 }
+
+contract ComplementFeedTest is Base {
+    uint256 constant NO = 2;
+
+    function setUp() public override {
+        super.setUp();
+        oracle.setComplement(NO, YES);
+    }
+
+    function test_noDerivedFromYes() public {
+        oracle.setPrice(YES, 0.3e18);
+        (uint256 p, uint256 t) = oracle.getPrice(NO);
+        assertEq(p, 0.7e18);
+        assertEq(t, block.timestamp);
+        _skip(10 minutes, 0.4e18);
+        assertEq(oracle.sigmaWad(NO, 1 days), oracle.sigmaWad(YES, 1 days));
+        assertGt(oracle.sigmaWad(NO, 1 days), 0);
+    }
+
+    function test_cannotPushComplementDirectly() public {
+        vm.expectRevert(bytes4(keccak256("IsComplement()")));
+        oracle.setPrice(NO, 0.5e18);
+    }
+
+    function test_medianFilterAppliesToComplement() public {
+        oracle.setMedianFilter(true);
+        oracle.setPrice(YES, 0.5e18);
+        oracle.setPrice(YES, 0.2e18); // one-tick spike
+        (uint256 p,) = oracle.getPrice(NO);
+        assertEq(p, 0.5e18, "spike filtered on the derived side too");
+    }
+}

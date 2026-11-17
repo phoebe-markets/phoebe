@@ -30,6 +30,9 @@ contract KeeperOracle is IPriceOracle, IVolatilityOracle, Ownable {
     }
 
     mapping(uint256 => Feed) internal feeds;
+    /// @notice NO token => its YES token. A complement feed isn't stored: price = 1 - price(YES), same timestamp and
+    ///         the same sigma (both sides move by the same absolute amount). Halves the gas per keeper push.
+    mapping(uint256 => uint256) public complementOf;
     mapping(address => bool) public updaters;
     uint256 public tau = 3 days;
     /// @notice If set, getPrice returns the median of the last 3 pushes. A one-push spike (bad print, thin book)
@@ -37,6 +40,9 @@ contract KeeperOracle is IPriceOracle, IVolatilityOracle, Ownable {
     bool public medianFilter;
 
     event PriceUpdated(uint256 indexed tokenId, uint256 priceWad, uint256 sigma1dWad);
+    event ComplementSet(uint256 indexed noTokenId, uint256 indexed yesTokenId);
+
+    error IsComplement();
 
     constructor() Ownable(msg.sender) {
         updaters[msg.sender] = true;
@@ -55,8 +61,16 @@ contract KeeperOracle is IPriceOracle, IVolatilityOracle, Ownable {
         tau = _tau;
     }
 
+    /// @notice Derive `noTokenId`'s price from `yesTokenId` (0 unsets).
+    function setComplement(uint256 noTokenId, uint256 yesTokenId) external onlyOwner {
+        require(complementOf[yesTokenId] == 0 && noTokenId != yesTokenId, "chain");
+        complementOf[noTokenId] = yesTokenId;
+        emit ComplementSet(noTokenId, yesTokenId);
+    }
+
     function setPrice(uint256 tokenId, uint256 priceWad) public {
         require(updaters[msg.sender], "not updater");
+        if (complementOf[tokenId] != 0) revert IsComplement();
         require(priceWad <= 1e18, "price > 1");
         Feed storage f = feeds[tokenId];
         if (f.updatedAt != 0) {
@@ -81,6 +95,11 @@ contract KeeperOracle is IPriceOracle, IVolatilityOracle, Ownable {
     }
 
     function getPrice(uint256 tokenId) external view returns (uint256, uint256) {
+        uint256 yes = complementOf[tokenId];
+        if (yes != 0) {
+            (uint256 p, uint256 t) = this.getPrice(yes);
+            return (1e18 - p, t);
+        }
         Feed memory f = feeds[tokenId];
         if (!medianFilter) return (f.price, f.updatedAt);
         return (_median(f.price, f.prev1, f.prev2), f.updatedAt);
@@ -93,6 +112,7 @@ contract KeeperOracle is IPriceOracle, IVolatilityOracle, Ownable {
     }
 
     function sigmaWad(uint256 tokenId, uint256 horizon) external view returns (uint256) {
-        return Math.sqrt(feeds[tokenId].varRate * horizon);
+        uint256 yes = complementOf[tokenId];
+        return Math.sqrt(feeds[yes != 0 ? yes : tokenId].varRate * horizon);
     }
 }

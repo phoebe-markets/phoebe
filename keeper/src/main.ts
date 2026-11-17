@@ -10,7 +10,7 @@
  *
  * Live mode. Polymarket CLOB midpoints, one Polymarket YES token id per listed market (default: the deployment's
  * polyTokenIds). With a KeeperVenue deployment the keeper is also the market maker (approvals + inventory):
- *   DEPLOYMENT=amoy RPC_URL=... KEEPER_PK=... bun keeper/src/main.ts live [--interval 60] [--min-move 0.003] [--heartbeat 1500]
+ *   DEPLOYMENT=amoy RPC_URL=... KEEPER_PK=... bun keeper/src/main.ts live [--interval 60] [--min-move 0.003] [--heartbeat 3300]
  *   Live pushes are throttled for testnet gas: a market is pushed when its price moves >= min-move, and every market
  *   at least once per heartbeat (seconds). Keep the heartbeat under KeeperVenue.maxPriceAge.
  *
@@ -65,7 +65,7 @@ const traderEvery = flag("traders", 0);
 const traders = traderEvery > 0 ? new DemoTraders(c, d) : undefined;
 
 const minMove = BigInt(Math.round(flag("min-move", 0.003) * 1e18));
-const heartbeatMs = flag("heartbeat", 1500) * 1000;
+const heartbeatMs = flag("heartbeat", 3300) * 1000;
 const lastPushed: (bigint | undefined)[] = [];
 let lastHeartbeat = 0;
 
