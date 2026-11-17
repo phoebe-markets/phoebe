@@ -8,15 +8,20 @@
  *   bun keeper/src/main.ts replay sim/data/biden-nominee.json [more.json ...] [--speed 20] [--traders 12]
  *   (--traders N: demo trader opens a position every N ticks)
  *
- * Live mode. Polymarket CLOB midpoints, one Polymarket YES token id per listed market:
- *   bun keeper/src/main.ts live <polymarketTokenId> [...] [--interval 30]
+ * Live mode. Polymarket CLOB midpoints, one Polymarket YES token id per listed market (default: the deployment's
+ * polyTokenIds). With a KeeperVenue deployment the keeper is also the market maker (approvals + inventory):
+ *   DEPLOYMENT=amoy RPC_URL=... KEEPER_PK=... bun keeper/src/main.ts live [--interval 60] [--min-move 0.003] [--heartbeat 1500]
+ *   Live pushes are throttled for testnet gas: a market is pushed when its price moves >= min-move, and every market
+ *   at least once per heartbeat (seconds). Keep the heartbeat under KeeperVenue.maxPriceAge.
  *
- * Env: RPC_URL (default http://127.0.0.1:8545), KEEPER_PK (default Anvil account #1), COOL_OFF_SECONDS (21600)
+ * Env: DEPLOYMENT (default local), RPC_URL (default http://127.0.0.1:8545), KEEPER_PK (default Anvil account #1),
+ *      COOL_OFF_SECONDS (21600)
  */
 import { clients, loadDeployment, log } from "./config";
 import { PolymarketFeed, ReplayFeed, describe, pushPrices } from "./oracle";
 import { RiskKeeper } from "./risk";
 import { DemoTraders } from "./traders";
+import { Maker } from "./maker";
 
 const args = process.argv.slice(2);
 const mode = args[0];
@@ -36,7 +41,8 @@ if (mode !== "replay" && mode !== "live") {
 }
 
 const d = loadDeployment();
-const c = clients();
+const c = clients(undefined, d.chainId);
+if (mode === "live" && positional.length === 0 && d.polyTokenIds?.length) positional.push(...d.polyTokenIds);
 if (positional.length !== d.markets) {
   console.error(`deployment lists ${d.markets} market(s) but ${positional.length} feed(s) were given`);
   process.exit(1);
@@ -45,23 +51,52 @@ if (positional.length !== d.markets) {
 const keeper = new RiskKeeper(c, d, {
   coolOff: BigInt(process.env.COOL_OFF_SECONDS ?? 6 * 3600),
   slipBufferBps: 100n,
-  recycle: true,
+  recycle: d.venueType !== "keeper", // with KeeperVenue, seized shares simply become maker inventory
 });
 
 const feed = mode === "replay" ? new ReplayFeed(positional) : new PolymarketFeed(positional);
 const delayMs = mode === "replay" ? 1000 / flag("speed", 20) : flag("interval", 30) * 1000;
 log(`keeper up: ${mode}, ${d.markets} market(s), keeper ${c.account.address}`);
 
+const maker = d.venueType === "keeper" ? new Maker(c, d) : undefined;
+if (maker) await maker.setup();
+
 const traderEvery = flag("traders", 0);
 const traders = traderEvery > 0 ? new DemoTraders(c, d) : undefined;
+
+const minMove = BigInt(Math.round(flag("min-move", 0.003) * 1e18));
+const heartbeatMs = flag("heartbeat", 1500) * 1000;
+const lastPushed: (bigint | undefined)[] = [];
+let lastHeartbeat = 0;
+
+/** Live mode: drop markets whose price hasn't moved enough, unless the heartbeat is due. */
+function throttle(prices: (bigint | undefined)[]) {
+  if (mode !== "live") return prices;
+  const beat = Date.now() - lastHeartbeat >= heartbeatMs;
+  if (beat) lastHeartbeat = Date.now();
+  return prices.map((p, i) => {
+    if (p === undefined) return undefined;
+    const prev = lastPushed[i];
+    const moved = prev === undefined || (p > prev ? p - prev : prev - p) >= minMove;
+    if (!moved && !beat) return undefined;
+    lastPushed[i] = p;
+    return p;
+  });
+}
 
 let n = 0;
 for (;;) {
   const step = await feed.next();
   if (!step) break;
-  await pushPrices(c, d, step.prices, step.timestamp);
-  await keeper.sweep();
+  try {
+    await pushPrices(c, d, throttle(step.prices), step.timestamp);
+    await keeper.sweep();
+  } catch (e) {
+    if (mode !== "live") throw e;
+    log(`tick failed, retrying next interval: ${(e as Error).message.split("\n")[0]}`); // RPC/API hiccups mustn't kill a live keeper
+  }
   if (traders && n % traderEvery === 0) await traders.step(n);
+  if (maker && n % 20 === 19) await maker.restock().catch((e) => log(`maker restock failed: ${(e as Error).message.split("\n")[0]}`));
   if (++n % 50 === 0 || mode === "live") {
     const when = step.timestamp ? new Date(Number(step.timestamp) * 1000).toISOString().slice(0, 16) : "now";
     log(`${when} ${describe(step.prices)} | open ${keeper.openCount} | inventory lots ${keeper.inventoryLots} | ${JSON.stringify(keeper.stats)}`);

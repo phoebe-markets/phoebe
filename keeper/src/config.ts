@@ -2,13 +2,17 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { createPublicClient, createTestClient, createWalletClient, http, type Abi, type Address } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
-import { foundry } from "viem/chains";
+import { foundry, polygonAmoy } from "viem/chains";
 
 const ROOT = join(import.meta.dir, "..", "..");
 
 export type Deployment = {
   chainId: number;
   markets: number;
+  names?: string[];
+  venueType?: "mock" | "keeper";
+  polyTokenIds?: string[];
+  deployBlock?: number;
   usdc: Address;
   ctf: Address;
   oracle: Address;
@@ -30,6 +34,8 @@ export function abi(contract: string): Abi {
 
 const errorsOf = (a: Abi) => a.filter((x) => x.type === "error");
 
+export const ABI_EXTRA = () => ({ ctf: abi("MockCTF"), keeperVenue: abi("KeeperVenue") });
+
 export const ABI = {
   // include token errors so reverts bubbling up from USDC / ERC-1155 transfers decode by name
   pm: [...abi("PositionManager"), ...errorsOf(abi("MockUSDC")), ...errorsOf(abi("MockCTF"))] as Abi,
@@ -40,23 +46,28 @@ export const ABI = {
   erc20: abi("MockUSDC"),
 };
 
-export function loadDeployment(path = join(ROOT, "deployments", "local.json")): Deployment {
+/** DEPLOYMENT=<name> selects deployments/<name>.json (default "local"). */
+export function loadDeployment(path = join(ROOT, "deployments", `${process.env.DEPLOYMENT ?? "local"}.json`)): Deployment {
   return JSON.parse(readFileSync(path, "utf8")) as Deployment;
 }
 
 // Anvil dev account #1, the keeper in script/Deploy.s.sol (public test key; override for anything real)
 const ANVIL_KEEPER_PK = "0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d";
 
-export function clients(rpcUrl = process.env.RPC_URL ?? "http://127.0.0.1:8545") {
+export function clients(rpcUrl = process.env.RPC_URL ?? "http://127.0.0.1:8545", chainId = 31337) {
   const account = privateKeyToAccount((process.env.KEEPER_PK ?? ANVIL_KEEPER_PK) as `0x${string}`);
-  const transport = http(rpcUrl, { batch: { batchSize: 200, wait: 0 } }); // JSON-RPC batching for sweeps
+  const chain = chainId === polygonAmoy.id ? polygonAmoy : foundry;
+  const transport = http(rpcUrl, { batch: { batchSize: 50, wait: 0 } }); // JSON-RPC batching for sweeps
   return {
     account,
-    pub: createPublicClient({ chain: foundry, transport }),
-    wallet: createWalletClient({ chain: foundry, transport, account }),
+    pub: createPublicClient({ chain, transport }),
+    wallet: createWalletClient({ chain, transport, account }),
     test: createTestClient({ chain: foundry, transport, mode: "anvil" }),
   };
 }
+
+/** Public RPCs cap eth_getLogs ranges; fetch in chunks. */
+export const LOG_CHUNK = BigInt(process.env.LOG_CHUNK ?? 2000);
 
 export type Clients = ReturnType<typeof clients>;
 

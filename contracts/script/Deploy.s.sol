@@ -7,6 +7,9 @@ import {IERC1155} from "@openzeppelin/contracts/token/ERC1155/IERC1155.sol";
 import {MockUSDC} from "../src/mocks/MockUSDC.sol";
 import {MockCTF} from "../src/mocks/MockCTF.sol";
 import {MockVenue} from "../src/mocks/MockVenue.sol";
+import {KeeperVenue} from "../src/KeeperVenue.sol";
+import {IExecutionVenue} from "../src/interfaces/IExecutionVenue.sol";
+import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {KeeperOracle} from "../src/KeeperOracle.sol";
 import {LendingPool} from "../src/LendingPool.sol";
 import {TrancheVault} from "../src/TrancheVault.sol";
@@ -27,7 +30,17 @@ import {IVolatilityOracle} from "../src/interfaces/IVolatilityOracle.sol";
 ///   MARKET_NAMES        comma-separated display names (default "market-0", ...)
 ///   MARKET_MAX_POSITION comma-separated per-position borrow caps in USD, 0 = unlimited (default 0).
 ///                       Recommended: ~3% of the market's daily volume (sim/RESULTS.md, round 3).
-/// Writes ../deployments/local.json for the keepers and the UI.
+/// Writes ../deployments/<DEPLOYMENT>.json for the keepers and the UI.
+///
+/// Networks (env):
+///   DEPLOYMENT     output name (default "local")
+///   DEPLOYER_PK    deployer key (default: Anvil #0). On a testnet the deployer also seeds both LP tranches.
+///   KEEPER_ADDR    keeper / oracle updater / market maker (default: Anvil #1)
+///   VENUE          "mock" (fills at oracle +/- spread from a float; replay demos) or "keeper" (KeeperVenue: fills
+///                  from the keeper's inventory, the Path B design; testnet). Default "mock".
+///   POLY_TOKEN_IDS comma-separated Polymarket YES token ids per market (recorded for the keeper's live feed)
+///   LP_SEED_USD    LP seed on testnets (default 1,000,000 mock USDC; 80% senior / 20% junior)
+/// On chain 31337 the Anvil demo accounts (trader, LPs, keeper) are funded and approved as before.
 contract Deploy is Script {
     // Anvil's default dev accounts (public, test-only keys).
     uint256 constant DEPLOYER_PK = 0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80;
@@ -42,7 +55,7 @@ contract Deploy is Script {
         MockUSDC usdc;
         MockCTF ctf;
         KeeperOracle oracle;
-        MockVenue venue;
+        IExecutionVenue venue;
         LendingPool pool;
         TrancheVault senior;
         TrancheVault junior;
@@ -57,16 +70,28 @@ contract Deploy is Script {
         uint256[] memory maxPos = vm.envOr("MARKET_MAX_POSITION", ",", new uint256[](res.length));
         require(maxPos.length == res.length, "MARKET_MAX_POSITION length");
 
-        address keeper = vm.addr(KEEPER_PK);
+        uint256 deployerPk = vm.envOr("DEPLOYER_PK", DEPLOYER_PK);
+        address keeper = vm.envOr("KEEPER_ADDR", vm.addr(KEEPER_PK));
+        bool keeperVenue = keccak256(bytes(vm.envOr("VENUE", string("mock")))) == keccak256("keeper");
+        bool local = block.chainid == 31337;
         Deployed memory d;
 
-        vm.startBroadcast(DEPLOYER_PK);
+        vm.startBroadcast(deployerPk);
         d.usdc = new MockUSDC();
         d.ctf = new MockCTF();
         d.oracle = new KeeperOracle();
-        d.venue = new MockVenue(d.usdc, d.ctf, d.oracle, 50);
-        d.ctf.setMinter(address(d.venue), true);
-        d.usdc.mint(address(d.venue), 100_000_000 * USD);
+        if (keeperVenue) {
+            KeeperVenue kv = new KeeperVenue(IERC20(address(d.usdc)), IERC1155(address(d.ctf)), d.oracle, keeper);
+            kv.setParams(50, 30 minutes); // 0.5% spread; the keeper's live heartbeat (25 min) keeps prices fresher than this
+            d.venue = kv;
+            // testnet stand-in for "the keeper buys shares on Polymarket": it may mint mock outcome tokens
+            d.ctf.setMinter(keeper, true);
+        } else {
+            MockVenue mv = new MockVenue(d.usdc, d.ctf, d.oracle, 50);
+            d.venue = mv;
+            d.ctf.setMinter(address(mv), true);
+            d.usdc.mint(address(mv), 100_000_000 * USD);
+        }
 
         d.pool = new LendingPool(d.usdc);
         d.senior = new TrancheVault(d.pool, 0, "Phoebe Senior", "phSR");
@@ -85,6 +110,7 @@ contract Deploy is Script {
         d.pm.setAbsorbUnderwater(true);
         d.pm.setKeeper(keeper, true);
         d.pool.setManager(address(d.pm));
+        if (keeperVenue) KeeperVenue(address(d.venue)).setCaller(address(d.pm), true);
 
         d.oracle.setUpdater(keeper, true);
         for (uint256 i; i < res.length; ++i) {
@@ -109,29 +135,42 @@ contract Deploy is Script {
             d.oracle.setPrice(2 * i + 2, 1e18 - px[i] * 1e12);
         }
 
-        // fund demo accounts
-        d.usdc.mint(vm.addr(SENIOR_LP_PK), 800_000 * USD);
-        d.usdc.mint(vm.addr(JUNIOR_LP_PK), 200_000 * USD);
-        d.usdc.mint(vm.addr(TRADER_PK), 1_000_000 * USD);
-        d.usdc.mint(keeper, 1_000_000 * USD); // liquidation capital
-        vm.stopBroadcast();
+        d.usdc.mint(keeper, 1_000_000 * USD); // liquidation capital + (keeper venue) buyback float
 
-        _lp(SENIOR_LP_PK, d, d.senior, 800_000 * USD);
-        _lp(JUNIOR_LP_PK, d, d.junior, 200_000 * USD);
+        if (local) {
+            // Anvil demo accounts
+            d.usdc.mint(vm.addr(SENIOR_LP_PK), 800_000 * USD);
+            d.usdc.mint(vm.addr(JUNIOR_LP_PK), 200_000 * USD);
+            d.usdc.mint(vm.addr(TRADER_PK), 1_000_000 * USD);
+            vm.stopBroadcast();
 
-        vm.startBroadcast(TRADER_PK);
-        d.usdc.approve(address(d.pm), type(uint256).max);
-        vm.stopBroadcast();
-        vm.startBroadcast(KEEPER_PK);
-        d.usdc.approve(address(d.pm), type(uint256).max);
-        vm.stopBroadcast();
+            _lp(SENIOR_LP_PK, d, d.senior, 800_000 * USD);
+            _lp(JUNIOR_LP_PK, d, d.junior, 200_000 * USD);
+
+            vm.startBroadcast(TRADER_PK);
+            d.usdc.approve(address(d.pm), type(uint256).max);
+            vm.stopBroadcast();
+            vm.startBroadcast(KEEPER_PK);
+            d.usdc.approve(address(d.pm), type(uint256).max);
+            vm.stopBroadcast();
+        } else {
+            // testnet: the deployer seeds both tranches; the keeper sets its own approvals at startup
+            uint256 seed = vm.envOr("LP_SEED_USD", uint256(1_000_000)) * USD;
+            address me = vm.addr(deployerPk);
+            d.usdc.mint(me, seed);
+            d.usdc.approve(address(d.senior), seed);
+            d.usdc.approve(address(d.junior), seed);
+            d.senior.deposit(seed * 8 / 10, me);
+            d.junior.deposit(seed - seed * 8 / 10, me);
+            vm.stopBroadcast();
+        }
 
         string[] memory names = new string[](res.length);
         for (uint256 i; i < res.length; ++i) names[i] = string.concat("market-", vm.toString(i));
         names = vm.envOr("MARKET_NAMES", ",", names);
         require(names.length == res.length, "MARKET_NAMES length");
 
-        _write(d, res, names, keeper);
+        _write(d, res, names, keeper, keeperVenue);
     }
 
     function _lp(uint256 pk, Deployed memory d, TrancheVault v, uint256 amt) internal {
@@ -141,8 +180,14 @@ contract Deploy is Script {
         vm.stopBroadcast();
     }
 
-    function _write(Deployed memory d, uint256[] memory res, string[] memory names, address keeper) internal {
+    function _write(Deployed memory d, uint256[] memory res, string[] memory names, address keeper, bool keeperVenue)
+        internal
+    {
         string memory k = "deploy";
+        string memory name = vm.envOr("DEPLOYMENT", string("local"));
+        vm.serializeString(k, "venueType", keeperVenue ? "keeper" : "mock");
+        vm.serializeString(k, "polyTokenIds", vm.envOr("POLY_TOKEN_IDS", ",", new string[](0)));
+        vm.serializeUint(k, "deployBlock", block.number);
         vm.serializeUint(k, "chainId", block.chainid);
         vm.serializeUint(k, "markets", res.length);
         vm.serializeString(k, "names", names);
@@ -158,8 +203,9 @@ contract Deploy is Script {
         vm.serializeAddress(k, "keeper", keeper);
         vm.serializeAddress(k, "trader", vm.addr(TRADER_PK));
         string memory out = vm.serializeAddress(k, "positionManager", address(d.pm));
-        vm.writeJson(out, string.concat(vm.projectRoot(), "/../deployments/local.json"));
-        console.log("deployment written to deployments/local.json");
+        string memory path = string.concat(vm.projectRoot(), "/../deployments/", name, ".json");
+        vm.writeJson(out, path);
+        console.log("deployment written to", path);
     }
 
     function _one(uint256 v) internal pure returns (uint256[] memory a) {

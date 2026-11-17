@@ -1,5 +1,5 @@
 import { BaseError, ContractFunctionRevertedError, maxUint256 } from "viem";
-import { ABI, type Clients, type Deployment, WAD, fmtUsd, log } from "./config";
+import { ABI, LOG_CHUNK, type Clients, type Deployment, WAD, fmtUsd, log } from "./config";
 
 type Health = {
   priceWad: bigint;
@@ -40,12 +40,15 @@ export class RiskKeeper {
     private c: Clients,
     private d: Deployment,
     private opts: RiskKeeperOpts,
-  ) {}
+  ) {
+    this.fromBlock = BigInt(d.deployBlock ?? 0);
+  }
 
   /** Pull new position events since the last sync. */
   async sync() {
-    const toBlock = await this.c.pub.getBlockNumber();
-    if (toBlock < this.fromBlock) return;
+    const head = await this.c.pub.getBlockNumber();
+    if (head < this.fromBlock) return;
+    const toBlock = head - this.fromBlock > LOG_CHUNK ? this.fromBlock + LOG_CHUNK - 1n : head; // catch up in chunks
     const logs = await this.c.pub.getContractEvents({
       address: this.d.positionManager,
       abi: ABI.pm,
@@ -72,7 +75,9 @@ export class RiskKeeper {
   }
 
   async sweep() {
-    await this.sync();
+    // catch up fully before acting (a fresh keeper on a long-lived chain may need several chunks)
+    const head = await this.c.pub.getBlockNumber();
+    while (this.fromBlock <= head) await this.sync();
     const now = (await this.c.pub.getBlock()).timestamp;
     // read every position's health in parallel (batched into one HTTP request), then act sequentially
     const ids = [...this.open];

@@ -9,3 +9,4 @@ sim/data/clusters/
 deployments/local.json
 web/dist/
 deployments/polymarket-signer.json
+deployments/amoy-sim.json
