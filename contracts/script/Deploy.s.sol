@@ -16,6 +16,7 @@ import {TrancheVault} from "../src/TrancheVault.sol";
 import {RiskEngine} from "../src/RiskEngine.sol";
 import {PositionManager} from "../src/PositionManager.sol";
 import {IVolatilityOracle} from "../src/interfaces/IVolatilityOracle.sol";
+import {ICtfRedeemer} from "../src/interfaces/IConditionalTokens.sol";
 
 /// @title Deploy
 /// @notice Local (Anvil) deployment of the whole protocol with the backtested "full" risk config
@@ -24,7 +25,7 @@ import {IVolatilityOracle} from "../src/interfaces/IVolatilityOracle.sol";
 ///   anvil &
 ///   forge script script/Deploy.s.sol --rpc-url http://127.0.0.1:8545 --broadcast
 ///
-/// Markets: market i trades tokens 2i+1 (YES) and 2i+2 (NO). Configure with env:
+/// Markets (mock deployments): market i trades tokens 2i+1 (YES) and 2i+2 (NO). Configure with env:
 ///   MARKET_RESOLUTIONS  comma-separated unix times   (default: one market, now + 30 days)
 ///   MARKET_PRICES       comma-separated YES prices * 1e6 (default 500000)
 ///   MARKET_NAMES        comma-separated display names (default "market-0", ...)
@@ -41,6 +42,18 @@ import {IVolatilityOracle} from "../src/interfaces/IVolatilityOracle.sol";
 ///   POLY_TOKEN_IDS comma-separated Polymarket YES token ids per market (recorded for the keeper's live feed)
 ///   LP_SEED_USD    LP seed on testnets (default 1,000,000 mock USDC; 80% senior / 20% junior)
 /// On chain 31337 the Anvil demo accounts (trader, LPs, keeper) are funded and approved as before.
+///
+/// Polygon mainnet (NETWORK=polygon; demo/polygon.sh sets this up from deployments/polygon-markets.env):
+///   real Polymarket contracts, no mocks, no minting, no LP seed. Market i trades Polymarket's own token ids.
+///   POLY_COLLATERAL     pool asset (pUSD)            POLY_CTF          ConditionalTokens
+///   POLY_CTF_ADAPTER    redeems in pUSD (CtfCollateralAdapter)
+///   POLY_TOKEN_IDS / POLY_NO_TOKEN_IDS / CONDITION_IDS   per market
+///   SENIOR_CAP_USD / JUNIOR_CAP_USD (default 200 / 100), MARKET_MAX_POSITION (default 30 each),
+///   MARKET_BORROW_CAP_USD (default 100), VENUE_SPREAD_BPS (default 150)
+///   Launch guards: oracle step limit 0.10 per 30s, KeeperVenue max price age 10 min, PositionManager 15 min,
+///   the keeper is a guardian everywhere (it can pause; only the deployer/owner un-pauses).
+/// Mock deployments (local, Amoy) also get a condition per market, so settlement can be rehearsed with
+/// MockCTF.reportPayouts.
 contract Deploy is Script {
     // Anvil's default dev accounts (public, test-only keys).
     uint256 constant DEPLOYER_PK = 0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80;
@@ -52,8 +65,8 @@ contract Deploy is Script {
     uint256 constant USD = 1e6;
 
     struct Deployed {
-        MockUSDC usdc;
-        MockCTF ctf;
+        IERC20 usdc;
+        IERC1155 ctf;
         KeeperOracle oracle;
         IExecutionVenue venue;
         LendingPool pool;
@@ -63,34 +76,79 @@ contract Deploy is Script {
         PositionManager pm;
     }
 
+    struct Markets {
+        uint256[] res;
+        uint256[] px;
+        uint256[] maxPos;
+        uint256[] yes;
+        uint256[] no;
+        bytes32[] cond;
+    }
+
     function run() external {
-        uint256[] memory res = vm.envOr("MARKET_RESOLUTIONS", ",", _one(block.timestamp + 30 days));
-        uint256[] memory px = vm.envOr("MARKET_PRICES", ",", _one(500_000));
-        require(res.length == px.length, "MARKET_RESOLUTIONS / MARKET_PRICES length");
-        uint256[] memory maxPos = vm.envOr("MARKET_MAX_POSITION", ",", new uint256[](res.length));
-        require(maxPos.length == res.length, "MARKET_MAX_POSITION length");
+        Markets memory mk;
+        mk.res = vm.envOr("MARKET_RESOLUTIONS", ",", _one(block.timestamp + 30 days));
+        mk.px = vm.envOr("MARKET_PRICES", ",", _one(500_000));
+        require(mk.res.length == mk.px.length, "MARKET_RESOLUTIONS / MARKET_PRICES length");
+        mk.maxPos = vm.envOr("MARKET_MAX_POSITION", ",", new uint256[](mk.res.length));
+        require(mk.maxPos.length == mk.res.length, "MARKET_MAX_POSITION length");
 
         uint256 deployerPk = vm.envOr("DEPLOYER_PK", DEPLOYER_PK);
         address keeper = vm.envOr("KEEPER_ADDR", vm.addr(KEEPER_PK));
         bool keeperVenue = keccak256(bytes(vm.envOr("VENUE", string("mock")))) == keccak256("keeper");
         bool local = block.chainid == 31337;
+        bool mainnet = keccak256(bytes(vm.envOr("NETWORK", string("")))) == keccak256("polygon");
+        if (mainnet) {
+            require(block.chainid == 137, "NETWORK=polygon but not chain 137");
+            require(keeperVenue, "mainnet needs VENUE=keeper");
+            require(vm.envOr("KEEPER_ADDR", address(0)) != address(0), "set KEEPER_ADDR");
+        }
         Deployed memory d;
 
+        // Token ids and conditions: market i = (mk.yes[i], mk.no[i], mk.cond[i])
+        mk.yes = new uint256[](mk.res.length);
+        mk.no = new uint256[](mk.res.length);
+        mk.cond = new bytes32[](mk.res.length);
+        if (mainnet) {
+            mk.yes = vm.envUint("POLY_TOKEN_IDS", ",");
+            mk.no = vm.envUint("POLY_NO_TOKEN_IDS", ",");
+            mk.cond = vm.envBytes32("CONDITION_IDS", ",");
+            require(mk.yes.length == mk.res.length && mk.no.length == mk.res.length && mk.cond.length == mk.res.length, "market lists");
+        } else {
+            for (uint256 i; i < mk.res.length; ++i) {
+                (mk.yes[i], mk.no[i]) = (2 * i + 1, 2 * i + 2);
+                mk.cond[i] = keccak256(abi.encodePacked("phoebe-mock-market-", vm.toString(i)));
+            }
+        }
+
         vm.startBroadcast(deployerPk);
-        d.usdc = new MockUSDC();
-        d.ctf = new MockCTF();
+        MockCTF mockCtf;
+        MockUSDC mockUsdc;
+        if (mainnet) {
+            d.usdc = IERC20(vm.envAddress("POLY_COLLATERAL"));
+            d.ctf = IERC1155(vm.envAddress("POLY_CTF"));
+        } else {
+            mockUsdc = new MockUSDC();
+            mockCtf = new MockCTF();
+            (d.usdc, d.ctf) = (IERC20(address(mockUsdc)), IERC1155(address(mockCtf)));
+            for (uint256 i; i < mk.res.length; ++i) mockCtf.setCondition(mk.cond[i], mk.yes[i], mk.no[i]);
+        }
         d.oracle = new KeeperOracle();
         if (keeperVenue) {
-            KeeperVenue kv = new KeeperVenue(IERC20(address(d.usdc)), IERC1155(address(d.ctf)), d.oracle, keeper);
-            kv.setParams(50, 1 hours); // 0.5% spread; the keeper's live heartbeat (55 min) keeps prices fresher than this
+            KeeperVenue kv = new KeeperVenue(d.usdc, d.ctf, d.oracle, keeper);
+            if (mainnet) {
+                kv.setParams(vm.envOr("VENUE_SPREAD_BPS", uint256(150)), 10 minutes);
+            } else {
+                kv.setParams(50, 1 hours); // 0.5% spread; the keeper's live heartbeat (55 min) keeps prices fresher than this
+                // testnet stand-in for "the keeper buys shares on Polymarket": it may mint mock outcome tokens
+                mockCtf.setMinter(keeper, true);
+            }
             d.venue = kv;
-            // testnet stand-in for "the keeper buys shares on Polymarket": it may mint mock outcome tokens
-            d.ctf.setMinter(keeper, true);
         } else {
-            MockVenue mv = new MockVenue(d.usdc, d.ctf, d.oracle, 50);
+            MockVenue mv = new MockVenue(d.usdc, mockCtf, d.oracle, 50);
             d.venue = mv;
-            d.ctf.setMinter(address(mv), true);
-            d.usdc.mint(address(mv), 100_000_000 * USD);
+            mockCtf.setMinter(address(mv), true);
+            mockUsdc.mint(address(mv), 100_000_000 * USD);
         }
 
         d.pool = new LendingPool(d.usdc);
@@ -103,45 +161,39 @@ contract Deploy is Script {
         d.risk.setJumpAllowance(0.1e18);
         d.risk.setGuardian(keeper, true);
 
-        d.pm = new PositionManager(d.usdc, IERC1155(address(d.ctf)), d.pool, d.risk, d.oracle, d.venue);
-        d.pm.setParams(300, 1 hours); // 3% starting liquidator bonus; prices older than 1h block opens/liquidations
+        d.pm = new PositionManager(d.usdc, d.ctf, d.pool, d.risk, d.oracle, d.venue);
+        // 3% starting liquidator bonus; stale prices block opens/liquidations (1h on testnets, 15 min on mainnet)
+        d.pm.setParams(300, mainnet ? 15 minutes : 1 hours);
         d.pm.setBonusRamp(100, 1_500); // Dutch auction: +1%/h once flagged, up to 15%
         d.pm.setFees(30, 200); // 0.3% opening fee, 2% liquidation fee -> junior
         d.pm.setAbsorbUnderwater(true);
         d.pm.setKeeper(keeper, true);
         d.pool.setManager(address(d.pm));
         if (keeperVenue) KeeperVenue(address(d.venue)).setCaller(address(d.pm), true);
-
-        d.oracle.setUpdater(keeper, true);
-        for (uint256 i; i < res.length; ++i) {
-            RiskEngine.Market memory m = RiskEngine.Market({
-                listed: true,
-                openEnabled: true,
-                liqLtvBps: 8_500,
-                openBufferBps: 1_000,
-                resolutionTime: uint64(res[i]),
-                cutoffDuration: 1 days,
-                rampDuration: 3 days,
-                borrowCap: uint128(500_000 * USD)
-            });
-            d.risk.listMarket(2 * i + 1, m);
-            d.risk.listMarket(2 * i + 2, m);
-            if (maxPos[i] > 0) {
-                uint256[] memory pair = new uint256[](2);
-                (pair[0], pair[1]) = (2 * i + 1, 2 * i + 2);
-                d.risk.setMaxPositionBorrow(pair, maxPos[i] * USD);
-            }
-            d.oracle.setComplement(2 * i + 2, 2 * i + 1); // NO = 1 - YES: one stored feed per market
-            d.oracle.setPrice(2 * i + 1, px[i] * 1e12);
+        d.pm.setRedeemer(ICtfRedeemer(mainnet ? vm.envAddress("POLY_CTF_ADAPTER") : address(mockCtf)));
+        d.pm.setGuardian(keeper, true);
+        d.pool.setGuardian(keeper, true);
+        if (mainnet) {
+            d.pool.setDepositCaps(vm.envOr("SENIOR_CAP_USD", uint256(200)) * USD, vm.envOr("JUNIOR_CAP_USD", uint256(100)) * USD);
+            d.oracle.setStepLimit(0.1e18, 30);
         }
 
-        d.usdc.mint(keeper, 1_000_000 * USD); // liquidation capital + (keeper venue) buyback float
+        d.oracle.setUpdater(keeper, true);
+        uint256 borrowCap = (mainnet ? vm.envOr("MARKET_BORROW_CAP_USD", uint256(100)) : 500_000) * USD;
+        if (mainnet && bytes(vm.envOr("MARKET_MAX_POSITION", string(""))).length == 0) {
+            for (uint256 i; i < mk.maxPos.length; ++i) mk.maxPos[i] = 30;
+        }
+        _listMarkets(d, mk, borrowCap);
 
-        if (local) {
+        if (mainnet) {
+            // nothing to mint or seed: LPs, the maker's inventory and liquidation capital are real money
+            vm.stopBroadcast();
+        } else if (local) {
+            mockUsdc.mint(keeper, 1_000_000 * USD); // liquidation capital + (keeper venue) buyback float
             // Anvil demo accounts
-            d.usdc.mint(vm.addr(SENIOR_LP_PK), 800_000 * USD);
-            d.usdc.mint(vm.addr(JUNIOR_LP_PK), 200_000 * USD);
-            d.usdc.mint(vm.addr(TRADER_PK), 1_000_000 * USD);
+            mockUsdc.mint(vm.addr(SENIOR_LP_PK), 800_000 * USD);
+            mockUsdc.mint(vm.addr(JUNIOR_LP_PK), 200_000 * USD);
+            mockUsdc.mint(vm.addr(TRADER_PK), 1_000_000 * USD);
             vm.stopBroadcast();
 
             _lp(SENIOR_LP_PK, d, d.senior, 800_000 * USD);
@@ -155,9 +207,10 @@ contract Deploy is Script {
             vm.stopBroadcast();
         } else {
             // testnet: the deployer seeds both tranches; the keeper sets its own approvals at startup
+            mockUsdc.mint(keeper, 1_000_000 * USD); // liquidation capital + (keeper venue) buyback float
             uint256 seed = vm.envOr("LP_SEED_USD", uint256(1_000_000)) * USD;
             address me = vm.addr(deployerPk);
-            d.usdc.mint(me, seed);
+            mockUsdc.mint(me, seed);
             d.usdc.approve(address(d.senior), seed);
             d.usdc.approve(address(d.junior), seed);
             d.senior.deposit(seed * 8 / 10, me);
@@ -165,12 +218,32 @@ contract Deploy is Script {
             vm.stopBroadcast();
         }
 
-        string[] memory names = new string[](res.length);
-        for (uint256 i; i < res.length; ++i) names[i] = string.concat("market-", vm.toString(i));
-        names = vm.envOr("MARKET_NAMES", ",", names);
-        require(names.length == res.length, "MARKET_NAMES length");
+        _write(d, mk, keeper, keeperVenue, mainnet);
+    }
 
-        _write(d, res, names, keeper, keeperVenue);
+    function _listMarkets(Deployed memory d, Markets memory mk, uint256 borrowCap) internal {
+        for (uint256 i; i < mk.res.length; ++i) {
+            RiskEngine.Market memory m = RiskEngine.Market({
+                listed: true,
+                openEnabled: true,
+                liqLtvBps: 8_500,
+                openBufferBps: 1_000,
+                resolutionTime: uint64(mk.res[i]),
+                cutoffDuration: 1 days,
+                rampDuration: 3 days,
+                borrowCap: uint128(borrowCap)
+            });
+            d.risk.listMarket(mk.yes[i], m);
+            d.risk.listMarket(mk.no[i], m);
+            if (mk.maxPos[i] > 0) {
+                uint256[] memory pair = new uint256[](2);
+                (pair[0], pair[1]) = (mk.yes[i], mk.no[i]);
+                d.risk.setMaxPositionBorrow(pair, mk.maxPos[i] * USD);
+            }
+            d.oracle.setComplement(mk.no[i], mk.yes[i]); // NO = 1 - YES: one stored feed per market
+            d.oracle.setPrice(mk.yes[i], mk.px[i] * 1e12);
+            d.pm.setCondition(mk.yes[i], mk.no[i], mk.cond[i]);
+        }
     }
 
     function _lp(uint256 pk, Deployed memory d, TrancheVault v, uint256 amt) internal {
@@ -180,11 +253,24 @@ contract Deploy is Script {
         vm.stopBroadcast();
     }
 
-    function _write(Deployed memory d, uint256[] memory res, string[] memory names, address keeper, bool keeperVenue)
-        internal
-    {
+    function _write(Deployed memory d, Markets memory mk, address keeper, bool keeperVenue, bool mainnet) internal {
+        uint256[] memory res = mk.res;
+        string[] memory names = new string[](res.length);
+        for (uint256 i; i < res.length; ++i) names[i] = string.concat("market-", vm.toString(i));
+        names = vm.envOr("MARKET_NAMES", ",", names);
+        require(names.length == res.length, "MARKET_NAMES length");
+        string[] memory tokenIds = new string[](2 * res.length);
+        for (uint256 i; i < res.length; ++i) {
+            (tokenIds[2 * i], tokenIds[2 * i + 1]) = (vm.toString(mk.yes[i]), vm.toString(mk.no[i]));
+        }
+
         string memory k = "deploy";
         string memory name = vm.envOr("DEPLOYMENT", string("local"));
+        // token ids as decimal strings: Polymarket's are 256-bit, beyond JSON number precision in JS
+        vm.serializeString(k, "tokenIds", tokenIds);
+        vm.serializeBytes32(k, "conditionIds", mk.cond);
+        vm.serializeBool(k, "mockCtf", !mainnet);
+        vm.serializeString(k, "marketSlugs", vm.envOr("MARKET_SLUGS", ",", new string[](0)));
         vm.serializeString(k, "venueType", keeperVenue ? "keeper" : "mock");
         vm.serializeBool(k, "complementNo", true);
         vm.serializeString(k, "polyTokenIds", vm.envOr("POLY_TOKEN_IDS", ",", new string[](0)));
