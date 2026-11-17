@@ -65,7 +65,11 @@ const ERC20 = parseAbi([
   "function allowance(address,address) view returns (uint256)",
   "function approve(address,uint256) returns (bool)",
 ]);
-const ONRAMP_ABI = parseAbi(["function wrap(address _asset, address _to, uint256 _amount)"]);
+const ONRAMP_ABI = parseAbi([
+  "function wrap(address _asset, address _to, uint256 _amount)",
+  "function paused(address asset) view returns (bool)",
+  "error OnlyUnpaused()",
+]);
 const EXCHANGE_ABI = parseAbi([
   "struct Order { uint256 salt; address maker; address signer; uint256 tokenId; uint256 makerAmount; uint256 takerAmount; uint8 side; uint8 signatureType; uint256 timestamp; bytes32 metadata; bytes32 builder; bytes signature; }",
   "function hashOrder(Order order) view returns (bytes32)",
@@ -138,6 +142,10 @@ async function tx(what: string, f: () => Promise<Hex>) {
 // ---------------------------------------------------------------- commands
 
 async function status() {
+  const [pausedUsdc, pausedUsdce] = await Promise.all(
+    [USDC, USDCE].map((a) => pub.readContract({ address: ONRAMP, abi: ONRAMP_ABI, functionName: "paused", args: [a] })),
+  );
+  console.log(`pUSD onramp: native USDC ${pausedUsdc ? "PAUSED" : "open"}, USDC.e ${pausedUsdce ? "PAUSED" : "open"}`);
   const [pol, usdc, usdce] = await Promise.all([
     pub.getBalance({ address: account.address }),
     pub.readContract({ address: USDC, abi: ERC20, functionName: "balanceOf", args: [account.address] }),
@@ -168,6 +176,12 @@ async function fund() {
   const amount = parseUnits(args[1] ?? "1", 6);
   const asset = has("usdce") ? USDCE : USDC;
   const s = signerAddress();
+  // Polymarket pauses wrapping per asset (native USDC was paused on 2026-11-16 while USDC.e was open)
+  const paused = await pub.readContract({ address: ONRAMP, abi: ONRAMP_ABI, functionName: "paused", args: [asset] });
+  if (paused) {
+    const other = asset === USDC ? "USDC.e (use --usdce)" : "native USDC (drop --usdce)";
+    throw new Error(`Polymarket's onramp has wrapping PAUSED for ${has("usdce") ? "USDC.e" : "native USDC"}. Try ${other}.`);
+  }
   console.log(`wrap ${usd(amount)} ${has("usdce") ? "USDC.e" : "USDC"} from ${account.address} into pUSD held by the signer ${s}`);
   await tx(`approve ${usd(amount)} to the pUSD onramp`, () =>
     wallet.writeContract({ address: asset, abi: ERC20, functionName: "approve", args: [ONRAMP, amount] }),
