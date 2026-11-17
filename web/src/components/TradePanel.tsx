@@ -36,7 +36,8 @@ export function TradePanel({ m, snap, side, setSide, onOpen }: Props) {
   const ltv = shares > 0 ? borrow / (shares * s.price) : 0;
   // liquidation price at today's limit: debt = shares * p * liqLtv (ignores the limit moving with price)
   const liqPrice = shares > 0 && s.liqLtv > 0 ? borrow / (shares * s.liqLtv) : NaN;
-  const canOpen = s.openAllowed && margin > 0 && margin + fee <= snap.account.usdc && ltv <= s.maxLtv;
+  const resolved = s.price <= 0 || s.price >= 1; // nothing left to buy: the outcome is decided
+  const canOpen = s.openAllowed && !resolved && margin > 0 && margin + fee <= snap.account.usdc && ltv <= s.maxLtv;
 
   async function submit() {
     setBusy(true);
@@ -96,7 +97,15 @@ export function TradePanel({ m, snap, side, setSide, onOpen }: Props) {
         (rising {snap.fees.rampPerHour / 100}%/h if nobody takes it) plus a {snap.fees.liqFeeBps / 100}% fee.
       </div>
       <button className="btn" disabled={!canOpen || busy} onClick={submit}>
-        {busy ? "Opening…" : !s.openAllowed ? "Market closed to new positions" : `Open ${lev(levX)} long ${side}`}
+        {busy
+          ? "Opening…"
+          : resolved
+            ? "Market resolved"
+            : !s.openAllowed
+              ? "Market closed to new positions"
+              : margin + fee > snap.account.usdc
+                ? "Not enough USDC"
+                : `Open ${lev(levX)} long ${side}`}
       </button>
       {msg && <div className={`msg${msg.err ? " err" : ""}`}>{msg.text}</div>}
     </section>

@@ -110,16 +110,16 @@ export function App() {
 
       <div className="grid-main">
         <MarketPanel m={m} history={snap.history[m.index] ?? []} side={side} chainTime={snap.chainTime} />
-        <TradePanel m={m} snap={snap} side={side} setSide={setSide}
+        <TradePanel key={`trade-${acct}`} m={m} snap={snap} side={side} setSide={setSide}
           onOpen={act((tokenId: bigint, margin: number, borrow: number) => openPosition(wallet, d, abi, tokenId, margin, borrow))} />
       </div>
 
-      <Positions snap={snap}
+      <Positions key={`pos-${acct}`} snap={snap}
         onClose={act((id: bigint) => closePosition(wallet, d, abi, id))}
         onAddMargin={act((id: bigint, amount: number) => addMargin(wallet, d, abi, id, amount))} />
 
       <div className="grid-2">
-        <LpPanel snap={snap}
+        <LpPanel key={`lp-${acct}`} snap={snap}
           onDeposit={act((t: "senior" | "junior", amount: number) => deposit(wallet, d, abi, t, amount))}
           onWithdraw={act((t: "senior" | "junior", amount: number) => withdraw(wallet, d, abi, t, amount))} />
         <ActivityFeed items={snap.activity} />

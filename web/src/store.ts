@@ -27,7 +27,7 @@ export type PositionView = {
   side: "YES" | "NO";
   tokenId: bigint;
   shares: number;
-  margin: number;
+  margin: number; // initial margin + margin added later
   entry: number;
   price: number;
   value: number;
@@ -88,6 +88,7 @@ class EventStore {
   fromBlock = 0n;
   blockTime = new Map<bigint, number>();
   opened = new Map<bigint, Opened>();
+  marginAdded = new Map<bigint, bigint>(); // fresh USDC put into a position after opening (cost basis)
   gone = new Set<bigint>();
   activity: Activity[] = [];
   // per token: [t, price, sigma1d]
@@ -168,6 +169,7 @@ class EventStore {
         if (a.since > 0n) push("Flagged", `#${a.id} flagged: liquidation auction started`, a.id);
         break;
       case "MarginAdded":
+        this.marginAdded.set(a.id, (this.marginAdded.get(a.id) ?? 0n) + a.repaid);
         push("MarginAdded", `#${a.id} added margin: $${fmt0(n6(a.repaid))} of debt repaid`, a.id);
         break;
     }
@@ -335,7 +337,7 @@ async function read(
       const price = n18(h.priceWad);
       const value = n6(h.value);
       const debt = n6(h.debt);
-      const margin = n6(o.margin);
+      const margin = n6(o.margin + (store.marginAdded.get(o.id) ?? 0n)); // all USDC the trader put in
       return {
         id: o.id,
         market: Number((o.tokenId - 1n) / 2n),
