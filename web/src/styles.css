@@ -1158,3 +1158,40 @@ th.num {
   width: var(--pill-h);
   height: var(--pill-h);
 }
+
+/* menu triggers in the top bar */
+.pill-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  height: var(--pill-h, 38px);
+  padding: 0 14px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--ink);
+  font-size: 13px;
+  cursor: pointer;
+}
+.pill-btn:hover,
+.wallet-btn:hover {
+  border-color: var(--border-strong);
+}
+.chev {
+  opacity: 0.6;
+  transition: transform 0.2s;
+}
+[aria-expanded="true"] > .chev {
+  transform: rotate(180deg);
+}
+.btn.wallet-connect {
+  gap: 8px;
+}
+.menu-pop .check {
+  float: right;
+  color: var(--accent);
+  margin-left: 12px;
+}
+.menu-pop [aria-checked="true"] {
+  color: var(--accent);
+}

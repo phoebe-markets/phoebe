@@ -157,6 +157,12 @@ function ThemeToggle({ theme, setTheme }: { theme: Theme; setTheme: (t: Theme) =
   );
 }
 
+const Chevron = () => (
+  <svg className="chev" viewBox="0 0 12 12" width="10" height="10" aria-hidden>
+    <path d="M2.5 4.5 6 8l3.5-3.5" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
+  </svg>
+);
+
 /** A button that opens a small menu; closes on outside click or Escape. */
 function Menu({ label, className, children }: { label: React.ReactNode; className?: string; children: (close: () => void) => React.ReactNode }) {
   const [open, setOpen] = useState(false);
@@ -256,13 +262,21 @@ export function App() {
 
   const wallet =
     CFG.wallet === "demo" ? (
-      <select className="pill-select" aria-label="Account" value={w.demoIdx} onChange={(e) => w.setDemoIdx(Number(e.target.value))}>
-        {DEMO_ACCOUNTS.map((a, i) => (
-          <option key={a.label} value={i}>{a.label} · {shortAddr(demoWallet(a.pk).account.address)}</option>
-        ))}
-      </select>
+      <Menu className="wallet-btn" label={<><span className="dot" aria-hidden />{DEMO_ACCOUNTS[w.demoIdx].label}<Chevron /></>}>
+        {(close) => (
+          <>
+            <div className="menu-note mono">{usd(snap.account.usdc)} USDC</div>
+            {DEMO_ACCOUNTS.map((a, i) => (
+              <button key={a.label} role="menuitemradio" aria-checked={i === w.demoIdx} onClick={() => { close(); w.setDemoIdx(i); }}>
+                {a.label} <small>{shortAddr(demoWallet(a.pk).account.address)}</small>
+                {i === w.demoIdx && <span className="check" aria-hidden>✓</span>}
+              </button>
+            ))}
+          </>
+        )}
+      </Menu>
     ) : address ? (
-      <Menu className="wallet-btn" label={<><span className="dot" aria-hidden />{shortAddr(address)}</>}>
+      <Menu className="wallet-btn" label={<><span className="dot" aria-hidden />{shortAddr(address)}<Chevron /></>}>
         {(close) => (
           <>
             <div className="menu-note">Connected via {w.walletName}</div>
@@ -278,7 +292,7 @@ export function App() {
     ) : w.wallets.length === 0 ? (
       <span className="chip">No browser wallet: install MetaMask or Rabby</span>
     ) : (
-      <Menu className="btn wallet-connect" label={w.connecting ? "Connecting…" : "Connect wallet"}>
+      <Menu className="btn wallet-connect" label={w.connecting ? "Connecting…" : <>Connect wallet<Chevron /></>}>
         {(close) =>
           w.wallets.map((c) => (
             <button key={c.uid} role="menuitem" disabled={w.connecting} onClick={() => { close(); w.connect(c.id); }}>
@@ -303,12 +317,16 @@ export function App() {
           <span className="chip chain-chip" title="Chain time (replays run on historical time) and block">
             {when(snap.chainTime)} UTC · #{String(snap.block)}
           </span>
-          <select className="pill-select" aria-label="Network" value={NET} onChange={(e) => switchNet(e.target.value as Net)}>
-            {(Object.keys(NETWORKS) as Net[]).map((n) => (
-              <option key={n} value={n}>{NETWORKS[n].label}</option>
-            ))}
-          </select>
-          {address && CFG.wallet === "demo" && <span className="chip">{usd(snap.account.usdc)} USDC</span>}
+          <Menu className="pill-btn" label={<>{CFG.label}<Chevron /></>}>
+            {(close) =>
+              (Object.keys(NETWORKS) as Net[]).map((n) => (
+                <button key={n} role="menuitemradio" aria-checked={n === NET} onClick={() => { close(); if (n !== NET) switchNet(n); }}>
+                  {NETWORKS[n].label}
+                  {n === NET && <span className="check" aria-hidden>✓</span>}
+                </button>
+              ))
+            }
+          </Menu>
           {wallet}
           <ThemeToggle theme={theme} setTheme={setTheme} />
         </div>
