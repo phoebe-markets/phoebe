@@ -26,8 +26,18 @@
  * `test <tokenId> --mode hash --yes --no-post` (on-chain steps run on the fork; nothing is posted to Polymarket).
  *
  * Nothing here ever crosses the book: orders are BUYs at the minimum tick, far below the best bid.
+ *
+ * Network egress for Polymarket API calls (RPC calls stay direct):
+ *   --ssh <alias>        open `ssh -N -D` to that host for the run and send CLOB traffic through it (e.g. --ssh earth)
+ *   --socks <host:port>  use an existing SOCKS5 proxy instead
+ *   bun keeper/src/polymarket-1271-test.ts geo --ssh earth   # what country Polymarket sees, and whether it's blocked
+ * Before posting, the script asks Polymarket's geoblock endpoint and refuses to post if that location is blocked.
  */
 import { readFileSync, writeFileSync, mkdirSync, existsSync } from "node:fs";
+import { spawn, type ChildProcess } from "node:child_process";
+import { createConnection } from "node:net";
+import axios from "axios"; // the same instance @polymarket/clob-client-v2 uses for every API call
+import { SocksProxyAgent } from "socks-proxy-agent";
 import { join } from "node:path";
 import {
   createPublicClient,
@@ -150,7 +160,57 @@ async function tx(what: string, f: () => Promise<Hex>) {
   if (r.status !== "success") process.exit(1);
 }
 
+// ---------------------------------------------------------------- egress (SOCKS for Polymarket API traffic)
+
+let tunnel: ChildProcess | undefined;
+
+function portOpen(port: number) {
+  return new Promise<boolean>((res) => {
+    const c = createConnection({ host: "127.0.0.1", port });
+    c.once("connect", () => (c.destroy(), res(true)));
+    c.once("error", () => res(false));
+  });
+}
+
+async function setupEgress() {
+  let socks = opt("socks", process.env.CLOB_SOCKS ?? "");
+  const sshHost = opt("ssh", "");
+  if (sshHost) {
+    const port = 10_800 + Math.floor(Math.random() * 1000);
+    tunnel = spawn("ssh", ["-N", "-o", "BatchMode=yes", "-o", "ExitOnForwardFailure=yes", "-D", `127.0.0.1:${port}`, sshHost], {
+      stdio: ["ignore", "ignore", "inherit"],
+    });
+    process.on("exit", () => tunnel?.kill());
+    for (let i = 0; i < 50 && !(await portOpen(port)); i++) {
+      if (tunnel.exitCode !== null) throw new Error(`ssh -D to ${sshHost} exited (${tunnel.exitCode})`);
+      await Bun.sleep(200);
+    }
+    if (!(await portOpen(port))) throw new Error(`SOCKS tunnel to ${sshHost} didn't come up`);
+    socks = `127.0.0.1:${port}`;
+    console.log(`egress: Polymarket API via ssh -D ${sshHost} (SOCKS 127.0.0.1:${port})`);
+  } else if (socks) {
+    console.log(`egress: Polymarket API via SOCKS ${socks}`);
+  }
+  if (socks) {
+    const agent = new SocksProxyAgent(`socks5h://${socks}`); // socks5h: DNS resolved on the far side too
+    axios.defaults.httpAgent = agent;
+    axios.defaults.httpsAgent = agent;
+    axios.defaults.proxy = false; // ignore HTTP(S)_PROXY env so traffic can't silently bypass the tunnel
+  }
+}
+
+/** Polymarket's own geoblock check, over the same egress as the API calls. */
+async function geoblock(): Promise<{ blocked: boolean; country?: string; ip?: string }> {
+  const r = await axios.get("https://polymarket.com/api/geoblock", { timeout: 15_000 });
+  return r.data;
+}
+
 // ---------------------------------------------------------------- commands
+
+async function geo() {
+  const g = await geoblock();
+  console.log(`Polymarket sees: ${JSON.stringify(g)}`);
+}
 
 async function status() {
   const [pausedUsdc, pausedUsdce] = await Promise.all(
@@ -352,6 +412,11 @@ async function test() {
     else throw new Error(`preflight failed: the exchange rejects this order on-chain: ${(e as Error).message.split("\n")[0]}`);
   }
 
+  if (willPost) {
+    const g = await geoblock();
+    console.log(`geoblock: ${JSON.stringify(g)}`);
+    if (g.blocked) throw new Error(`Polymarket reports this location (${g.country}) as blocked; not posting.`);
+  }
   if (!willPost) {
     return console.log(`\n[${confirmed ? "--no-post" : "dry run"}] stopping before POST /order.${confirmed ? "" : " Re-run with --yes to post and cancel."}`);
   }
@@ -371,9 +436,14 @@ async function test() {
   console.log("DELETE order ->", JSON.stringify(cancel));
 }
 
-const commands: Record<string, () => Promise<void>> = { status, deploy, swap, fund, approve, withdraw, test };
+const commands: Record<string, () => Promise<void>> = { status, deploy, swap, fund, approve, withdraw, test, geo };
 if (!commands[cmd]) {
   console.error(`commands: ${Object.keys(commands).join(", ")}  (see the header of this file)`);
   process.exit(1);
 }
-await commands[cmd]();
+try {
+  await setupEgress();
+  await commands[cmd]();
+} finally {
+  tunnel?.kill();
+}

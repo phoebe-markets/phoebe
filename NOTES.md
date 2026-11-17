@@ -25,6 +25,10 @@ bun $T test <tokenId> --mode 7739 --yes    # owner-signature design
 bun $T withdraw --yes
 ```
 API creds are derived from PK unless CLOB_API_KEY / CLOB_SECRET / CLOB_PASSPHRASE are set.
+Polymarket API traffic can egress via `--ssh <host>` (opens `ssh -N -D` for the run) or `--socks host:port`; RPC stays
+direct. `geo` shows what Polymarket sees, and `test --yes` refuses to post if Polymarket reports the location as blocked.
+(This dev machine exits via a US VPN, which Polymarket blocks; the team is in Norway, so use `--ssh earth`.)
+Native USDC wrapping is currently paused on the onramp: `swap` converts USDC to USDC.e first, then `fund --usdce`.
 The result to look for is "RESULT: the CLOB ACCEPTED / did NOT accept ...", plus the API's errorMsg.
 
 **Testnet note:** Polymarket's contracts exist on Amoy at the same addresses, but its staging CLOB
