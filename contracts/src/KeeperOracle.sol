@@ -38,9 +38,16 @@ contract KeeperOracle is IPriceOracle, IVolatilityOracle, Ownable {
     /// @notice If set, getPrice returns the median of the last 3 pushes. A one-push spike (bad print, thin book)
     ///         can't trigger liquidations, at the cost of reacting one push later to real moves.
     bool public medianFilter;
+    /// @notice Rate limit on keeper pushes: a push moves the price at most maxStepWad * min(dt, stepWindow) /
+    ///         stepWindow from the last price (dt = time since that push); anything further is clamped, not
+    ///         rejected, so a real crash still arrives within a few windows. Bounds what a stolen keeper key can do
+    ///         before a guardian pauses (e.g. 0.10 per 30s: 5 minutes to move a price by 1.0). 0 = off.
+    uint64 public maxStepWad;
+    uint64 public stepWindow = 30;
 
     event PriceUpdated(uint256 indexed tokenId, uint256 priceWad, uint256 sigma1dWad);
     event ComplementSet(uint256 indexed noTokenId, uint256 indexed yesTokenId);
+    event PriceClamped(uint256 indexed tokenId, uint256 requestedWad, uint256 appliedWad);
 
     error IsComplement();
 
@@ -54,6 +61,16 @@ contract KeeperOracle is IPriceOracle, IVolatilityOracle, Ownable {
 
     function setMedianFilter(bool on) external onlyOwner {
         medianFilter = on;
+    }
+
+    function setStepLimit(uint64 _maxStepWad, uint64 _stepWindow) external onlyOwner {
+        require(_stepWindow > 0 && _maxStepWad <= 1e18, "step");
+        (maxStepWad, stepWindow) = (_maxStepWad, _stepWindow);
+    }
+
+    /// @notice Owner override for genuine gaps (e.g. a market jumping on news faster than the step limit allows).
+    function forcePrice(uint256 tokenId, uint256 priceWad) external onlyOwner {
+        _setPrice(tokenId, priceWad, false);
     }
 
     function setTau(uint256 _tau) external onlyOwner {
@@ -70,11 +87,22 @@ contract KeeperOracle is IPriceOracle, IVolatilityOracle, Ownable {
 
     function setPrice(uint256 tokenId, uint256 priceWad) public {
         require(updaters[msg.sender], "not updater");
+        _setPrice(tokenId, priceWad, true);
+    }
+
+    function _setPrice(uint256 tokenId, uint256 priceWad, bool limited) internal {
         if (complementOf[tokenId] != 0) revert IsComplement();
         require(priceWad <= 1e18, "price > 1");
         Feed storage f = feeds[tokenId];
         if (f.updatedAt != 0) {
             uint256 dt = block.timestamp - f.updatedAt;
+            if (limited && maxStepWad != 0) {
+                uint256 step = uint256(maxStepWad) * (dt < stepWindow ? dt : stepWindow) / stepWindow;
+                uint256 requested = priceWad;
+                if (priceWad > f.price + step) priceWad = f.price + step;
+                else if (priceWad + step < f.price) priceWad = f.price - step;
+                if (priceWad != requested) emit PriceClamped(tokenId, requested, priceWad);
+            }
             uint256 dp = priceWad > f.price ? priceWad - f.price : f.price - priceWad;
             f.varRate = (f.varRate * tau + dp * dp) / (tau + dt);
             f.prev2 = f.prev1;

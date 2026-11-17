@@ -3,6 +3,7 @@ pragma solidity ^0.8.24;
 
 import {Base} from "./Base.t.sol";
 import {PositionManager} from "../src/PositionManager.sol";
+import {LendingPool} from "../src/LendingPool.sol";
 import {ICtfRedeemer} from "../src/interfaces/IConditionalTokens.sol";
 
 contract SettlementTest is Base {
@@ -171,5 +172,33 @@ contract PauseTest is Base {
         pm.setPaused(true);
         pm.setPaused(false);
         assertFalse(pm.paused());
+    }
+}
+
+contract DepositCapTest is Base {
+    function test_capLimitsDeposits() public {
+        pool.setDepositCaps(810_000 * USD, type(uint256).max); // senior holds 800k
+        assertEq(senior.maxDeposit(lpSenior), 10_000 * USD);
+        _deposit(lpSenior, senior, 10_000 * USD);
+        assertEq(senior.maxDeposit(lpSenior), 0);
+        usdc.mint(lpSenior, 1);
+        vm.startPrank(lpSenior);
+        usdc.approve(address(senior), 1);
+        vm.expectRevert(); // ERC4626ExceededMaxDeposit
+        senior.deposit(1, lpSenior);
+        vm.stopPrank();
+    }
+
+    function test_pauseStopsDepositsNotWithdrawals() public {
+        address g = makeAddr("guardian");
+        pool.setGuardian(g, true);
+        vm.prank(g);
+        pool.setDepositsPaused(true);
+        assertEq(junior.maxDeposit(lpJunior), 0);
+        vm.prank(lpJunior);
+        junior.withdraw(1_000 * USD, lpJunior, lpJunior);
+        vm.prank(g);
+        vm.expectRevert(LendingPool.NotGuardian.selector);
+        pool.setDepositsPaused(false);
     }
 }

@@ -48,6 +48,11 @@ contract LendingPool is Ownable {
     uint256 public seniorYieldShareBps = 6_000;
     uint256 public minJuniorCoverageBps = 2_000; // junior >= 20% of outstanding debt
 
+    // --- launch guards: per-tranche deposit caps, and a deposit pause (guardians pause, only the owner un-pauses)
+    uint256[2] public depositCap = [type(uint256).max, type(uint256).max];
+    bool public depositsPaused;
+    mapping(address => bool) public guardians;
+
     event Accrued(uint256 interest, uint256 toSenior, uint256 toJunior, uint256 borrowIndex);
     event Borrowed(uint256 amount, uint256 scaled);
     event Repaid(uint256 amount, uint256 scaled);
@@ -62,6 +67,8 @@ contract LendingPool is Ownable {
     error InsufficientCash();
     error JuniorCoverage();
     error BadParams();
+    error DepositCap();
+    error NotGuardian();
 
     modifier onlyManager() {
         if (msg.sender != manager) revert OnlyManager();
@@ -97,7 +104,28 @@ contract LendingPool is Ownable {
         (seniorYieldShareBps, minJuniorCoverageBps) = (_seniorYieldShareBps, _minJuniorCoverageBps);
     }
 
+    function setDepositCaps(uint256 seniorCap, uint256 juniorCap) external onlyOwner {
+        depositCap = [seniorCap, juniorCap];
+    }
+
+    function setGuardian(address who, bool allowed) external onlyOwner {
+        guardians[who] = allowed;
+    }
+
+    function setDepositsPaused(bool on) external {
+        if (msg.sender != owner() && !(on && guardians[msg.sender])) revert NotGuardian();
+        depositsPaused = on;
+    }
+
     // ------------------------------------------------------------------ views
+
+    /// @notice Most a tranche can take in right now (deposit cap headroom; 0 while deposits are paused).
+    function maxDepositable(uint8 tranche) public view returns (uint256) {
+        if (depositsPaused) return 0;
+        uint256 a = trancheAssets(tranche);
+        uint256 cap = depositCap[tranche];
+        return a >= cap ? 0 : cap - a;
+    }
 
     function totalDebt() public view returns (uint256) {
         (uint256 idx,,) = _previewAccrual();
@@ -243,6 +271,7 @@ contract LendingPool is Ownable {
     function onDeposit(uint8 tranche, uint256 assets) external {
         if (msg.sender != vaults[tranche]) revert OnlyVault();
         accrue();
+        if (depositsPaused || trancheAssets_[tranche] + assets > depositCap[tranche]) revert DepositCap();
         cash += assets;
         trancheAssets_[tranche] += assets;
         emit TrancheDeposit(tranche, assets);

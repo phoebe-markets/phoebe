@@ -29,6 +29,15 @@ contract TrancheVault is ERC4626 {
         return pool.trancheAssets(tranche);
     }
 
+    function maxDeposit(address) public view override returns (uint256) {
+        return pool.maxDepositable(tranche);
+    }
+
+    function maxMint(address) public view override returns (uint256) {
+        uint256 a = pool.maxDepositable(tranche);
+        return a == type(uint256).max ? a : convertToShares(a);
+    }
+
     function maxWithdraw(address owner) public view override returns (uint256) {
         return Math.min(super.maxWithdraw(owner), pool.maxWithdrawable(tranche));
     }
