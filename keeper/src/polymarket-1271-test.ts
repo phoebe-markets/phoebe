@@ -14,7 +14,8 @@
  *
  *   bun keeper/src/polymarket-1271-test.ts status
  *   bun keeper/src/polymarket-1271-test.ts deploy --yes            # deploy PolymarketOrderSigner (owner = PK)
- *   bun keeper/src/polymarket-1271-test.ts fund 1 --yes            # wrap 1 USDC -> 1 pUSD straight into the signer
+ *   bun keeper/src/polymarket-1271-test.ts swap 1.5 --yes          # native USDC -> USDC.e on Uniswap V3 (0.01% pool)
+ *   bun keeper/src/polymarket-1271-test.ts fund 1 --usdce --yes    # wrap 1 USDC.e -> 1 pUSD straight into the signer
  *   bun keeper/src/polymarket-1271-test.ts approve --yes           # signer approves pUSD to the exchanges
  *   bun keeper/src/polymarket-1271-test.ts test <tokenId>          # DRY RUN: build, sign, preflight on-chain
  *   bun keeper/src/polymarket-1271-test.ts test <tokenId> --mode hash --yes   # post + cancel (vault design)
@@ -56,6 +57,11 @@ const PUSD: Address = "0xC011a7E12a19f7B1f670d46F03B03f3342E82DFB";
 const ONRAMP: Address = "0x93070a847efEf7F70739046A929D47a521F5B8ee";
 const USDC: Address = "0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359"; // native USDC
 const USDCE: Address = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174"; // bridged USDC.e
+// Uniswap V3 on Polygon (canonical deployments; router/quoter verified to point at the factory below)
+const UNI_V3_FACTORY: Address = "0x1F98431c8aD98523631AE4a59f267346ea31F984";
+const UNI_ROUTER02: Address = "0x68b3465833fb72A70ecDF485E0e4C7bD8665Fc45";
+const UNI_QUOTER_V2: Address = "0x61fFE014bA17989E743c5F6cB21bF9697530B21e";
+const STABLE_POOL_FEE = 100; // 0.01% USDC/USDC.e pool
 const EXCHANGE_V2: Address = "0xE111180000d2663C0091e4f400237545B87B996B";
 const NEG_RISK_EXCHANGE_V2: Address = "0xe2222d279d744050d28e00520010520000310F59";
 const EXCHANGE_V3: Address = "0xe3333700cA9d93003F00f0F71f8515005F6c00Aa";
@@ -69,6 +75,11 @@ const ONRAMP_ABI = parseAbi([
   "function wrap(address _asset, address _to, uint256 _amount)",
   "function paused(address asset) view returns (bool)",
   "error OnlyUnpaused()",
+]);
+const UNI_ABI = parseAbi([
+  "function getPool(address,address,uint24) view returns (address)",
+  "function quoteExactInputSingle((address tokenIn, address tokenOut, uint256 amountIn, uint24 fee, uint160 sqrtPriceLimitX96) params) returns (uint256 amountOut, uint160 sqrtPriceX96After, uint32 initializedTicksCrossed, uint256 gasEstimate)",
+  "function exactInputSingle((address tokenIn, address tokenOut, uint24 fee, address recipient, uint256 amountIn, uint256 amountOutMinimum, uint160 sqrtPriceLimitX96) params) payable returns (uint256 amountOut)",
 ]);
 const EXCHANGE_ABI = parseAbi([
   "struct Order { uint256 salt; address maker; address signer; uint256 tokenId; uint256 makerAmount; uint256 takerAmount; uint8 side; uint8 signatureType; uint256 timestamp; bytes32 metadata; bytes32 builder; bytes signature; }",
@@ -188,6 +199,36 @@ async function fund() {
   );
   await tx(`onramp.wrap(${asset}, signer, ${usd(amount)})`, () =>
     wallet.writeContract({ address: ONRAMP, abi: ONRAMP_ABI, functionName: "wrap", args: [asset, s, amount] }),
+  );
+}
+
+/** Native USDC -> USDC.e on Uniswap V3's 0.01% stable pool (Polymarket's onramp only accepts USDC.e right now). */
+async function swap() {
+  const amountIn = parseUnits(args[1] ?? "1.5", 6);
+  const slipBps = BigInt(opt("slippage-bps", "50"));
+  const pool = await pub.readContract({ address: UNI_V3_FACTORY, abi: UNI_ABI, functionName: "getPool", args: [USDC, USDCE, STABLE_POOL_FEE] });
+  const { result } = await pub.simulateContract({
+    address: UNI_QUOTER_V2,
+    abi: UNI_ABI,
+    functionName: "quoteExactInputSingle",
+    args: [{ tokenIn: USDC, tokenOut: USDCE, amountIn, fee: STABLE_POOL_FEE, sqrtPriceLimitX96: 0n }],
+  });
+  const quoted = result[0];
+  const minOut = (quoted * (10_000n - slipBps)) / 10_000n;
+  console.log(`swap ${usd(amountIn)} USDC -> USDC.e via Uniswap V3 pool ${pool} (0.01%)`);
+  console.log(`quote ${usd(quoted)} USDC.e, min out ${usd(minOut)} (slippage ${slipBps} bps)`);
+  // stablecoins: refuse anything worse than 1% off par, whatever the slippage setting
+  if (quoted * 100n < amountIn * 99n) throw new Error(`quote is more than 1% below par; not swapping`);
+  await tx(`USDC.approve(router, ${usd(amountIn)})`, () =>
+    wallet.writeContract({ address: USDC, abi: ERC20, functionName: "approve", args: [UNI_ROUTER02, amountIn] }),
+  );
+  await tx(`router.exactInputSingle(${usd(amountIn)} USDC -> >= ${usd(minOut)} USDC.e to ${account.address})`, () =>
+    wallet.writeContract({
+      address: UNI_ROUTER02,
+      abi: UNI_ABI,
+      functionName: "exactInputSingle",
+      args: [{ tokenIn: USDC, tokenOut: USDCE, fee: STABLE_POOL_FEE, recipient: account.address, amountIn, amountOutMinimum: minOut, sqrtPriceLimitX96: 0n }],
+    }),
   );
 }
 
@@ -330,7 +371,7 @@ async function test() {
   console.log("DELETE order ->", JSON.stringify(cancel));
 }
 
-const commands: Record<string, () => Promise<void>> = { status, deploy, fund, approve, withdraw, test };
+const commands: Record<string, () => Promise<void>> = { status, deploy, swap, fund, approve, withdraw, test };
 if (!commands[cmd]) {
   console.error(`commands: ${Object.keys(commands).join(", ")}  (see the header of this file)`);
   process.exit(1);
