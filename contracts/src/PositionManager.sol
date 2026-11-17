@@ -13,6 +13,7 @@ import {LendingPool} from "./LendingPool.sol";
 import {RiskEngine} from "./RiskEngine.sol";
 import {IPriceOracle} from "./interfaces/IPriceOracle.sol";
 import {IExecutionVenue} from "./interfaces/IExecutionVenue.sol";
+import {IConditionalTokens, ICtfRedeemer} from "./interfaces/IConditionalTokens.sol";
 
 /// @title PositionManager
 /// @notice Leveraged long positions in Polymarket outcome tokens. (A short on YES is a long on NO.)
@@ -24,6 +25,10 @@ import {IExecutionVenue} from "./interfaces/IExecutionVenue.sol";
 ///            at the oracle price. No venue trade is needed, so liquidations don't depend on order-book depth.
 ///            If the shares are worth less than that, the liquidator takes all of them and the shortfall is
 ///            written off (junior tranche first).
+/// settle:    once a market resolves, `redeem` turns every share this contract holds into the pool asset (via the
+///            CTF redeemer), and `settle` pays each position out at the resolved value: debt first, the rest to the
+///            trader, any shortfall written off. The RiskEngine's time ramp liquidates leveraged positions before
+///            resolution, so this is the backstop for stragglers, absorbed inventory and unclaimed shares.
 contract PositionManager is ERC1155Holder, Ownable, ReentrancyGuard {
     using SafeERC20 for IERC20;
     using Math for uint256;
@@ -82,6 +87,26 @@ contract PositionManager is ERC1155Holder, Ownable, ReentrancyGuard {
     mapping(uint256 => uint256) public inventory;
     mapping(address => bool) public keepers;
 
+    /// @notice Pause: guardians (or the owner) stop new positions; only the owner un-pauses. Closing, adding margin,
+    ///         liquidation, absorb and settlement always stay available.
+    bool public paused;
+    mapping(address => bool) public guardians;
+
+    // --- resolution
+    struct Outcome {
+        bytes32 conditionId;
+        uint8 index; // outcome slot: 0 = YES, 1 = NO
+    }
+
+    /// @notice tokenId => its CTF condition and outcome slot. Unset (zero) for markets without settlement wiring.
+    mapping(uint256 => Outcome) public outcomeOf;
+    mapping(bytes32 => uint256[2]) internal tokensOf;
+    mapping(bytes32 => bool) public redeemed;
+    /// @notice Pool asset paid per share (WAD) once the market is redeemed.
+    mapping(uint256 => uint256) public payoutWad;
+    /// @notice Turns resolved shares into the pool asset (Polymarket's CtfCollateralAdapter on Polygon).
+    ICtfRedeemer public redeemer;
+
     event Opened(
         uint256 indexed id, address indexed owner, uint256 indexed tokenId, uint256 margin, uint256 borrowed, uint256 shares
     );
@@ -100,6 +125,10 @@ contract PositionManager is ERC1155Holder, Ownable, ReentrancyGuard {
     event SharesClaimed(address indexed owner, uint256 indexed tokenId, uint256 shares);
     event Absorbed(uint256 indexed id, uint256 indexed tokenId, uint256 debt, uint256 shares, uint256 markValue);
     event InventorySold(uint256 indexed tokenId, uint256 shares, uint256 proceeds);
+    event PausedSet(bool paused);
+    event ConditionSet(bytes32 indexed conditionId, uint256 yesId, uint256 noId);
+    event Redeemed(bytes32 indexed conditionId, uint256 yesPayoutWad, uint256 noPayoutWad, uint256 received, uint256 toPool);
+    event Settled(uint256 indexed id, uint256 proceeds, uint256 debt, uint256 toOwner, uint256 badDebt);
 
     error NotOwner();
     error OpenNotAllowed();
@@ -115,6 +144,13 @@ contract PositionManager is ERC1155Holder, Ownable, ReentrancyGuard {
     error NotUnderwater();
     error UseAbsorb();
     error NotKeeper();
+    error NotGuardian();
+    error IsPaused();
+    error MarketResolved();
+    error NotResolved();
+    error NotRedeemed();
+    error AlreadyRedeemed();
+    error NoCondition();
 
     constructor(
         IERC20 _usdc,
@@ -167,6 +203,30 @@ contract PositionManager is ERC1155Holder, Ownable, ReentrancyGuard {
         (openFeeBps, liquidationFeeBps) = (_openFeeBps, _liquidationFeeBps);
     }
 
+    function setGuardian(address who, bool allowed) external onlyOwner {
+        guardians[who] = allowed;
+    }
+
+    /// @notice Guardians can pause; only the owner can un-pause.
+    function setPaused(bool on) external {
+        if (msg.sender != owner() && !(on && guardians[msg.sender])) revert NotGuardian();
+        paused = on;
+        emit PausedSet(on);
+    }
+
+    function setRedeemer(ICtfRedeemer r) external onlyOwner {
+        redeemer = r;
+    }
+
+    /// @notice Wire a binary market to its CTF condition so it can be settled at resolution.
+    function setCondition(uint256 yesId, uint256 noId, bytes32 conditionId) external onlyOwner {
+        require(conditionId != bytes32(0) && yesId != noId && !redeemed[conditionId], "condition");
+        outcomeOf[yesId] = Outcome(conditionId, 0);
+        outcomeOf[noId] = Outcome(conditionId, 1);
+        tokensOf[conditionId] = [yesId, noId];
+        emit ConditionSet(conditionId, yesId, noId);
+    }
+
     function _setVenue(IExecutionVenue v) internal {
         venue = v;
         ctf.setApprovalForAll(address(v), true);
@@ -184,7 +244,9 @@ contract PositionManager is ERC1155Holder, Ownable, ReentrancyGuard {
         returns (uint256 id)
     {
         if (margin == 0) revert ZeroAmount();
+        if (paused) revert IsPaused();
         if (!risk.isOpenAllowed(tokenId)) revert OpenNotAllowed();
+        _requireLive(tokenId);
         uint256 price = _price(tokenId);
 
         usdc.safeTransferFrom(msg.sender, address(this), margin);
@@ -251,6 +313,7 @@ contract PositionManager is ERC1155Holder, Ownable, ReentrancyGuard {
     function close(uint256 id, uint256 minUsdcOut) external nonReentrant {
         Position memory p = positions[id];
         if (p.owner != msg.sender) revert NotOwner();
+        _requireLive(p.tokenId);
         pool.accrue();
 
         uint256 proceeds = venue.sell(p.tokenId, p.shares, minUsdcOut);
@@ -271,8 +334,14 @@ contract PositionManager is ERC1155Holder, Ownable, ReentrancyGuard {
         uint256 amt = claimableShares[msg.sender][tokenId];
         if (amt == 0) revert ZeroAmount();
         claimableShares[msg.sender][tokenId] = 0;
-        ctf.safeTransferFrom(address(this), msg.sender, tokenId, amt, "");
         emit SharesClaimed(msg.sender, tokenId, amt);
+        if (redeemed[outcomeOf[tokenId].conditionId]) {
+            // already redeemed with everything else this contract held: pay the resolved value instead
+            uint256 value = amt.mulDiv(payoutWad[tokenId], WAD);
+            if (value > 0) usdc.safeTransfer(msg.sender, value);
+        } else {
+            ctf.safeTransferFrom(address(this), msg.sender, tokenId, amt, "");
+        }
     }
 
     // ------------------------------------------------------------------ liquidation
@@ -305,6 +374,7 @@ contract PositionManager is ERC1155Holder, Ownable, ReentrancyGuard {
     function liquidate(uint256 id, uint256 maxPay) external nonReentrant returns (uint256 paid, uint256 seized) {
         Position memory p = positions[id];
         if (p.owner == address(0)) revert NoPosition();
+        _requireLive(p.tokenId);
         pool.accrue();
 
         Health memory h = _health(p, pool.borrowIndex());
@@ -356,6 +426,7 @@ contract PositionManager is ERC1155Holder, Ownable, ReentrancyGuard {
         if (!absorbUnderwater) revert UseAbsorb();
         Position memory p = positions[id];
         if (p.owner == address(0)) revert NoPosition();
+        _requireLive(p.tokenId);
         pool.accrue();
 
         Health memory h = _health(p, pool.borrowIndex());
@@ -377,6 +448,7 @@ contract PositionManager is ERC1155Holder, Ownable, ReentrancyGuard {
         returns (uint256 proceeds)
     {
         if (!keepers[msg.sender] && msg.sender != owner()) revert NotKeeper();
+        _requireLive(tokenId);
         inventory[tokenId] -= shares;
         proceeds = venue.sell(tokenId, shares, minUsdcOut);
         if (proceeds > 0) {
@@ -390,6 +462,81 @@ contract PositionManager is ERC1155Holder, Ownable, ReentrancyGuard {
     function inventoryValue(uint256 tokenId) external view returns (uint256) {
         (uint256 price,) = oracle.getPrice(tokenId);
         return inventory[tokenId].mulDiv(price, WAD);
+    }
+
+    // ------------------------------------------------------------------ settlement
+
+    /// @notice Redeem everything this contract holds in a resolved market (open positions, absorbed inventory and
+    ///         unclaimed liquidation leftovers) for the pool asset, and fix the per-share payout. Permissionless.
+    ///         Inventory proceeds go straight to the pool (junior); positions are then paid out with `settle`.
+    function redeem(bytes32 conditionId) external nonReentrant {
+        if (redeemed[conditionId]) revert AlreadyRedeemed();
+        uint256[2] memory t = tokensOf[conditionId];
+        if (t[0] == 0 && t[1] == 0) revert NoCondition();
+        IConditionalTokens c = IConditionalTokens(address(ctf));
+        uint256 den = c.payoutDenominator(conditionId);
+        if (den == 0) revert NotResolved();
+        redeemed[conditionId] = true;
+
+        // Floor rounding everywhere, so the sum of per-position payouts never exceeds what the CTF pays out.
+        uint256 toPool;
+        for (uint256 i; i < 2; ++i) {
+            uint256 w = c.payoutNumerators(conditionId, i) * WAD / den;
+            payoutWad[t[i]] = w;
+            toPool += inventory[t[i]].mulDiv(w, WAD);
+            inventory[t[i]] = 0;
+        }
+
+        uint256 before = usdc.balanceOf(address(this));
+        if (ctf.balanceOf(address(this), t[0]) + ctf.balanceOf(address(this), t[1]) > 0) {
+            uint256[] memory partition = new uint256[](2);
+            (partition[0], partition[1]) = (1, 2);
+            ctf.setApprovalForAll(address(redeemer), true);
+            redeemer.redeemPositions(address(usdc), bytes32(0), conditionId, partition);
+            ctf.setApprovalForAll(address(redeemer), false);
+        }
+        uint256 received = usdc.balanceOf(address(this)) - before;
+
+        if (toPool > received) toPool = received;
+        if (toPool > 0) {
+            usdc.forceApprove(address(pool), toPool);
+            pool.donate(toPool);
+        }
+        emit Redeemed(conditionId, payoutWad[t[0]], payoutWad[t[1]], received, toPool);
+    }
+
+    /// @notice Pay out a position in a redeemed market at its resolved value. Permissionless.
+    function settle(uint256 id) external nonReentrant {
+        Position memory p = positions[id];
+        if (p.owner == address(0)) revert NoPosition();
+        if (!redeemed[outcomeOf[p.tokenId].conditionId]) revert NotRedeemed();
+        pool.accrue();
+
+        uint256 proceeds = p.shares.mulDiv(payoutWad[p.tokenId], WAD);
+        uint256 owed = pool.debtOf(p.scaledDebt);
+        _clear(id, p);
+
+        uint256 rest = proceeds;
+        uint256 badDebt;
+        if (p.scaledDebt > 0) {
+            if (proceeds >= owed) {
+                usdc.forceApprove(address(pool), owed);
+                pool.repay(p.scaledDebt);
+                rest = proceeds - owed;
+            } else {
+                usdc.forceApprove(address(pool), proceeds);
+                badDebt = pool.writeOff(p.scaledDebt, proceeds);
+                rest = 0;
+            }
+        }
+        if (rest > 0) usdc.safeTransfer(p.owner, rest);
+        emit Settled(id, proceeds, owed, rest, badDebt);
+    }
+
+    /// @notice True once the market's CTF condition has reported (trading through the venue stops; use settle).
+    function isResolved(uint256 tokenId) public view returns (bool) {
+        bytes32 cond = outcomeOf[tokenId].conditionId;
+        return cond != bytes32(0) && IConditionalTokens(address(ctf)).payoutDenominator(cond) != 0;
     }
 
     // ------------------------------------------------------------------ views
@@ -416,6 +563,10 @@ contract PositionManager is ERC1155Holder, Ownable, ReentrancyGuard {
         h.liqLtvBps = risk.liqLtvBps(p.tokenId, price);
         // Stale prices block liquidation: never liquidate on bad data. Keepers must keep the oracle fresh.
         h.liquidatable = h.debt > 0 && block.timestamp - updatedAt <= maxPriceAge && h.debt * BPS > h.value * h.liqLtvBps;
+    }
+
+    function _requireLive(uint256 tokenId) internal view {
+        if (isResolved(tokenId)) revert MarketResolved();
     }
 
     function _price(uint256 tokenId) internal view returns (uint256 price) {
