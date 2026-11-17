@@ -8,3 +8,4 @@ sim/out/*
 sim/data/clusters/
 deployments/local.json
 web/dist/
+deployments/polymarket-signer.json

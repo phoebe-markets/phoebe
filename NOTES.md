@@ -1,8 +1,36 @@
 # Phoebe — open items
 
-## TODO (later): can a contract place orders through Polymarket's API?
+## Can a contract place orders through Polymarket's API?
 
-**Status:** parked; this doesn't block anything else. The contracts reach the market through the
+**Status (2026-11-16):** the on-chain half is **answered: yes**. The off-chain half (the CLOB API) is ready to test.
+- `contracts/src/polymarket/PolymarketOrderSigner.sol`: an EIP-1271 maker that accepts either an owner ERC-7739
+  signature (under its own domain, "PhoebeOrderSigner") or an owner pre-approved order hash (the vault design).
+- `contracts/test/PolymarketFork.t.sol` (run with `POLYGON_RPC=... forge test --mc PolymarketFork`): the **real deployed
+  CTFExchangeV2 accepts** both signature modes via `validateOrder`, rejects a mismatched order, and our order hash
+  matches `hashOrder`.
+- `keeper/src/polymarket-1271-test.ts`: deploy / fund / approve / test / withdraw against mainnet. Rehearsed end to end
+  on an Anvil fork (both modes, normal and neg-risk exchange). Only `POST /order` hasn't run, because that needs real
+  credentials. The test order is a BUY of 5 shares at the minimum tick ($0.01), far below the best bid, then cancelled.
+
+**To run the live test** (your key; about $1 pUSD + a little POL for gas):
+```sh
+export PK=0x...                      # EOA with some POL and >= $1 USDC on Polygon
+T=keeper/src/polymarket-1271-test.ts
+bun $T status
+bun $T deploy --yes
+bun $T fund 1 --yes                  # wraps 1 USDC into pUSD held by the signer (--usdce for USDC.e)
+bun $T approve --yes
+bun $T test <tokenId> --mode hash --yes    # the vault design
+bun $T test <tokenId> --mode 7739 --yes    # owner-signature design
+bun $T withdraw --yes
+```
+API creds are derived from PK unless CLOB_API_KEY / CLOB_SECRET / CLOB_PASSPHRASE are set.
+The result to look for is "RESULT: the CLOB ACCEPTED / did NOT accept ...", plus the API's errorMsg.
+
+**Testnet note:** Polymarket's contracts exist on Amoy at the same addresses, but its staging CLOB
+(clob-staging.polymarket.com) isn't publicly reachable, so the API question can only be answered on mainnet.
+
+### Original investigation The contracts reach the market through the
 `IExecutionVenue` interface (`contracts/src/interfaces/IExecutionVenue.sol`). Whichever path we
 pick, only a new venue adapter is needed.
 
