@@ -24,6 +24,7 @@ import {IVolatilityOracle} from "../src/interfaces/IVolatilityOracle.sol";
 /// Markets: market i trades tokens 2i+1 (YES) and 2i+2 (NO). Configure with env:
 ///   MARKET_RESOLUTIONS  comma-separated unix times   (default: one market, now + 30 days)
 ///   MARKET_PRICES       comma-separated YES prices * 1e6 (default 500000)
+///   MARKET_NAMES        comma-separated display names (default "market-0", ...)
 ///   MARKET_MAX_POSITION comma-separated per-position borrow caps in USD, 0 = unlimited (default 0).
 ///                       Recommended: ~3% of the market's daily volume (sim/RESULTS.md, round 3).
 /// Writes ../deployments/local.json for the keepers and the UI.
@@ -125,7 +126,12 @@ contract Deploy is Script {
         d.usdc.approve(address(d.pm), type(uint256).max);
         vm.stopBroadcast();
 
-        _write(d, res.length, keeper);
+        string[] memory names = new string[](res.length);
+        for (uint256 i; i < res.length; ++i) names[i] = string.concat("market-", vm.toString(i));
+        names = vm.envOr("MARKET_NAMES", ",", names);
+        require(names.length == res.length, "MARKET_NAMES length");
+
+        _write(d, res, names, keeper);
     }
 
     function _lp(uint256 pk, Deployed memory d, TrancheVault v, uint256 amt) internal {
@@ -135,10 +141,12 @@ contract Deploy is Script {
         vm.stopBroadcast();
     }
 
-    function _write(Deployed memory d, uint256 nMarkets, address keeper) internal {
+    function _write(Deployed memory d, uint256[] memory res, string[] memory names, address keeper) internal {
         string memory k = "deploy";
         vm.serializeUint(k, "chainId", block.chainid);
-        vm.serializeUint(k, "markets", nMarkets);
+        vm.serializeUint(k, "markets", res.length);
+        vm.serializeString(k, "names", names);
+        vm.serializeUint(k, "resolutionTimes", res);
         vm.serializeAddress(k, "usdc", address(d.usdc));
         vm.serializeAddress(k, "ctf", address(d.ctf));
         vm.serializeAddress(k, "oracle", address(d.oracle));

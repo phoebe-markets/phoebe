@@ -7,3 +7,4 @@ sim/out/*
 !sim/out/.gitkeep
 sim/data/clusters/
 deployments/local.json
+web/dist/

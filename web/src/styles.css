@@ -1,0 +1,445 @@
+/* Tokens. Dark is the default for a trading UI; light is its own selected set (not an automatic flip).
+   Chart roles follow the dataviz reference palette (validated categorical slots 1-2, reserved status colors). */
+:root {
+  color-scheme: dark;
+  --page: #0d0d0d;
+  --surface: #1a1a19;
+  --surface-2: #232321;
+  --ink: #f0efec;
+  --ink-2: #c3c2b7;
+  --muted: #898781;
+  --grid: #2c2c2a;
+  --axis: #383835;
+  --border: rgba(255, 255, 255, 0.1);
+  --series-yes: #3987e5; /* categorical slot 1, dark step */
+  --series-no: #d95926; /* categorical slot 2, dark step */
+  --good: #0ca30c;
+  --warning: #fab219;
+  --serious: #ec835a;
+  --critical: #d03b3b;
+  --accent: #3987e5;
+  --accent-ink: #ffffff;
+}
+@media (prefers-color-scheme: light) {
+  :root:where(:not([data-theme="dark"])) {
+    color-scheme: light;
+    --page: #f9f9f7;
+    --surface: #fcfcfb;
+    --surface-2: #f0efec;
+    --ink: #0b0b0b;
+    --ink-2: #52514e;
+    --muted: #898781;
+    --grid: #e1e0d9;
+    --axis: #c3c2b7;
+    --border: rgba(11, 11, 11, 0.1);
+    --series-yes: #2a78d6;
+    --series-no: #eb6834;
+    --accent: #2a78d6;
+  }
+}
+:root[data-theme="light"] {
+  color-scheme: light;
+  --page: #f9f9f7;
+  --surface: #fcfcfb;
+  --surface-2: #f0efec;
+  --ink: #0b0b0b;
+  --ink-2: #52514e;
+  --muted: #898781;
+  --grid: #e1e0d9;
+  --axis: #c3c2b7;
+  --border: rgba(11, 11, 11, 0.1);
+  --series-yes: #2a78d6;
+  --series-no: #eb6834;
+  --accent: #2a78d6;
+}
+
+* {
+  box-sizing: border-box;
+}
+html,
+body {
+  margin: 0;
+  background: var(--page);
+  color: var(--ink);
+  font: 14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif;
+}
+button,
+input,
+select {
+  font: inherit;
+  color: inherit;
+}
+
+.app {
+  max-width: 1280px;
+  margin: 0 auto;
+  padding: 16px;
+  display: grid;
+  gap: 16px;
+}
+.header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px 20px;
+}
+.brand {
+  font-weight: 650;
+  font-size: 18px;
+  letter-spacing: -0.01em;
+}
+.brand small {
+  color: var(--muted);
+  font-weight: 400;
+  margin-left: 8px;
+  font-size: 13px;
+}
+.header .spacer {
+  flex: 1;
+}
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  color: var(--ink-2);
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+}
+.grid-main {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 340px;
+  gap: 16px;
+}
+.grid-2 {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 16px;
+}
+@media (max-width: 900px) {
+  .grid-main,
+  .grid-2 {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+.card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 16px;
+  min-width: 0;
+}
+.card h2 {
+  margin: 0 0 12px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--ink-2);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.card h3 {
+  margin: 0 0 4px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--ink);
+}
+.sub {
+  color: var(--muted);
+  font-size: 12.5px;
+}
+
+.tiles {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
+  gap: 12px;
+  margin-bottom: 16px;
+}
+.tile .label {
+  color: var(--muted);
+  font-size: 12.5px;
+}
+.tile .value {
+  font-size: 22px;
+  font-weight: 600;
+}
+.tile .value.hero {
+  font-size: 48px;
+  line-height: 1.05;
+}
+.key {
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  margin-right: 6px;
+  vertical-align: baseline;
+}
+
+.why {
+  display: grid;
+  gap: 8px;
+  margin: 8px 0 16px;
+}
+.factor {
+  display: grid;
+  grid-template-columns: 150px minmax(0, 1fr) 64px;
+  align-items: center;
+  gap: 10px;
+  font-size: 13px;
+}
+.factor .name {
+  color: var(--ink-2);
+}
+.factor .num {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+.meter {
+  height: 8px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--accent) 18%, transparent);
+  overflow: hidden;
+}
+.meter > span {
+  display: block;
+  height: 100%;
+  border-radius: 999px;
+  background: var(--accent);
+}
+.factor.binding .name {
+  color: var(--ink);
+  font-weight: 600;
+}
+.factor.binding .meter > span {
+  background: var(--warning);
+}
+.badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 1px 8px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 600;
+  border: 1px solid var(--border);
+  white-space: nowrap;
+}
+.badge.good {
+  color: var(--good);
+}
+.badge.warning {
+  color: var(--warning);
+}
+.badge.critical {
+  color: var(--critical);
+}
+
+.chart-title {
+  font-size: 13px;
+  color: var(--ink-2);
+  margin: 4px 0 2px;
+  display: flex;
+  gap: 16px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+.legend-item {
+  display: inline-flex;
+  align-items: center;
+  color: var(--ink-2);
+  font-size: 12.5px;
+}
+.legend-item i {
+  display: inline-block;
+  width: 14px;
+  height: 2px;
+  border-radius: 2px;
+  margin-right: 6px;
+}
+.tooltip {
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 8px 10px;
+  font-size: 12.5px;
+  color: var(--ink);
+  font-variant-numeric: tabular-nums;
+}
+.tooltip .row {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+}
+.tooltip .muted {
+  color: var(--muted);
+}
+
+/* forms */
+.seg {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px;
+  margin-bottom: 12px;
+}
+.seg button {
+  padding: 8px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: transparent;
+  cursor: pointer;
+  font-weight: 600;
+}
+.seg button[aria-pressed="true"] {
+  background: var(--surface-2);
+  border-color: var(--ink-2);
+}
+.field {
+  display: grid;
+  gap: 4px;
+  margin-bottom: 12px;
+}
+.field label {
+  color: var(--muted);
+  font-size: 12.5px;
+  display: flex;
+  justify-content: space-between;
+}
+.field input[type="number"],
+select {
+  width: 100%;
+  padding: 8px 10px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--surface-2);
+}
+.field input[type="range"] {
+  width: 100%;
+  accent-color: var(--accent);
+}
+.summary {
+  display: grid;
+  gap: 4px;
+  margin: 12px 0;
+  font-size: 13px;
+}
+.summary .row {
+  display: flex;
+  justify-content: space-between;
+  font-variant-numeric: tabular-nums;
+}
+.summary .row span:first-child {
+  color: var(--muted);
+}
+.btn {
+  width: 100%;
+  padding: 10px;
+  border-radius: 8px;
+  border: none;
+  background: var(--accent);
+  color: var(--accent-ink);
+  font-weight: 600;
+  cursor: pointer;
+}
+.btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+.btn.ghost {
+  background: transparent;
+  color: var(--ink);
+  border: 1px solid var(--border);
+  width: auto;
+  padding: 4px 10px;
+  font-weight: 500;
+}
+.msg {
+  margin-top: 8px;
+  font-size: 12.5px;
+  color: var(--ink-2);
+}
+.msg.err {
+  color: var(--critical);
+}
+
+/* tables */
+.table-wrap {
+  overflow-x: auto;
+}
+table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+}
+th {
+  text-align: left;
+  color: var(--muted);
+  font-weight: 500;
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--grid);
+  white-space: nowrap;
+}
+td {
+  padding: 8px;
+  border-bottom: 1px solid var(--grid);
+  white-space: nowrap;
+}
+td.num,
+th.num {
+  text-align: right;
+}
+.health {
+  position: relative;
+  width: 120px;
+  height: 8px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--muted) 25%, transparent);
+}
+.health > span {
+  position: absolute;
+  inset: 0 auto 0 0;
+  border-radius: 999px;
+}
+.health > i {
+  position: absolute;
+  top: -3px;
+  bottom: -3px;
+  width: 2px;
+  background: var(--ink);
+  border-radius: 1px;
+}
+
+.feed {
+  display: grid;
+  gap: 6px;
+  max-height: 360px;
+  overflow-y: auto;
+  font-size: 13px;
+}
+.feed .item {
+  display: grid;
+  grid-template-columns: 92px 18px minmax(0, 1fr);
+  gap: 8px;
+  align-items: baseline;
+}
+.feed time {
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+  font-size: 12px;
+}
+.empty {
+  color: var(--muted);
+  font-size: 13px;
+  padding: 12px 0;
+}
+.banner {
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--warning);
+  border-radius: 8px;
+  padding: 10px 12px;
+  background: var(--surface);
+  font-size: 13px;
+}

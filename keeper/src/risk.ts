@@ -31,6 +31,7 @@ export type RiskKeeperOpts = {
  */
 export class RiskKeeper {
   private open = new Set<bigint>();
+  private tokenOfPos = new Map<bigint, bigint>(); // from Opened events, so liquidations never rescan logs
   private lots: Lot[] = [];
   private fromBlock = 0n;
   stats = { liquidations: 0, absorbs: 0, inventorySales: 0, skippedUnprofitable: 0, failed: 0 };
@@ -56,6 +57,7 @@ export class RiskKeeper {
       switch (l.eventName) {
         case "Opened":
           this.open.add(a.id);
+          this.tokenOfPos.set(a.id, a.tokenId);
           break;
         case "Closed":
         case "Liquidated":
@@ -109,7 +111,7 @@ export class RiskKeeper {
       }
       await this.send(request);
       this.stats.liquidations++;
-      const pos = await this.tokenOfLiquidated(id);
+      const pos = this.tokenOfPos.get(id);
       log(`liquidated #${id}: paid ${fmtUsd(paid)} for ${fmtUsd((seized * h.priceWad) / WAD)} of shares (LTV ${h.ltvBps}bps > ${h.liqLtvBps}bps)`);
       if (this.opts.recycle && pos !== undefined) await this.recycle(pos, seized);
     } catch (e) {
@@ -197,17 +199,6 @@ export class RiskKeeper {
   private async sharesOf(id: bigint) {
     return (await this.position(id))[2];
   }
-  private async tokenOfLiquidated(id: bigint) {
-    const logs = await this.c.pub.getContractEvents({
-      address: this.d.positionManager,
-      abi: ABI.pm,
-      eventName: "Opened",
-      args: { id },
-      fromBlock: 0n,
-    });
-    return (logs[0] as unknown as { args: { tokenId: bigint } } | undefined)?.args.tokenId;
-  }
-
   // ABIs are loaded at runtime (no static types), so simulateContract's request is passed through as-is.
   // biome-ignore lint/suspicious/noExplicitAny: see above
   private async send(request: any) {
