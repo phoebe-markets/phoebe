@@ -255,7 +255,13 @@ export function App() {
       refreshNow();
     }
   };
-  const m = snap.markets[Math.min(marketIdx, snap.markets.length - 1)];
+  // Markets switched off on-chain (opens disabled on both sides) drop out of the picker, unless this account still
+  // holds a position there; existing positions keep their close / add-margin / settle controls either way.
+  const listed = snap.markets.filter(
+    (mk) => mk.yes.openAllowed || mk.no.openAllowed || snap.account.positions.some((p) => p.market === mk.index),
+  );
+  const shown = listed.length ? listed : snap.markets;
+  const m = shown.find((mk) => mk.index === marketIdx) ?? shown[0];
   const faucet = () => {
     setFaucetMsg("Minting 10,000 test USDC…");
     act((w: Wallet) => mintTestUsdc(w, d, abi))().then(
@@ -349,7 +355,7 @@ export function App() {
 
         {tab === "trade" ? (
           <>
-            <MarketBar m={m} markets={snap.markets} onPick={setMarketIdx} chainTime={snap.chainTime} />
+            <MarketBar m={m} markets={shown} onPick={setMarketIdx} chainTime={snap.chainTime} />
             <div className="grid-main">
               <MarketPanel m={m} history={snap.history[m.index] ?? []} side={side} />
               <TradePanel key={`trade-${address}`} m={m} snap={snap} side={side} setSide={setSide}
