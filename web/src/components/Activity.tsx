@@ -1,5 +1,6 @@
 import type { Activity as A } from "../store";
 import { when } from "../format";
+import { CFG } from "../chain";
 
 const ICON: Record<A["kind"], [string, string]> = {
   Opened: ["+", "var(--ink-2)"],
@@ -18,7 +19,7 @@ export function ActivityFeed({ items }: { items: A[] }) {
     <section className="card" aria-label="Protocol activity">
       <h2>Protocol activity</h2>
       {items.length === 0 ? (
-        <div className="empty">Nothing yet. Start the keeper with demo/replay.sh.</div>
+        <div className="empty">{CFG.mainnet ? "No activity yet. Opens, liquidations and settlements show up here." : "Nothing yet. Start the keeper with demo/replay.sh."}</div>
       ) : (
         <div className="feed" role="log" aria-live="polite">
           {items.map((it) => (

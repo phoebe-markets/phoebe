@@ -1,0 +1,271 @@
+<!doctype html>
+<html><head><meta charset="utf-8">
+<!-- Devpost gallery slides, 1500x1000 (3:2). Render one per hash: slides.html#flow etc. (demo/gallery/render.sh) -->
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+:root{--bg:#07080f;--s0:#f4f6fb;--s1:#d7dbe8;--s2:#a9afc4;--s3:#737a93;--v:#9b8cff;--vd:#6c5ce7;--b:#6cb6ff;--halo:#c9c2ff;
+  --gain:#8ef0c8;--loss:#ff7a8a;--warn:#f5b83d;--line:rgba(196,204,230,.14);--line2:rgba(196,204,230,.26);--card:rgba(17,20,38,.78);
+  --moon:linear-gradient(115deg,#f4f6fb 0%,#c9c2ff 38%,#9b8cff 62%,#6cb6ff 100%)}
+html,body{width:1500px;height:1000px;overflow:hidden;background:var(--bg)}
+body{position:relative;font-family:Inter,sans-serif;color:var(--s0)}
+canvas#stars{position:absolute;inset:0}
+.slide{position:absolute;inset:0;padding:84px 96px;display:none}
+.slide.on{display:block}
+.top{display:flex;justify-content:space-between;align-items:flex-start}
+.kick{font-size:18px;font-weight:600;letter-spacing:.18em;text-transform:uppercase;color:var(--v)}
+.logo{width:150px;opacity:.9}
+h2{margin-top:16px;font-size:58px;font-weight:600;letter-spacing:-.03em;line-height:1.05}
+h2 em{font-style:normal;background:var(--moon);-webkit-background-clip:text;color:transparent}
+.lede{margin-top:16px;font-size:23px;line-height:1.45;color:var(--s2);max-width:1080px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:22px;padding:28px 30px;backdrop-filter:blur(6px)}
+.mono{font-family:"JetBrains Mono",monospace}
+.muted{color:var(--s3)}
+.foot{position:absolute;left:96px;right:96px;bottom:50px;display:flex;justify-content:space-between;font-size:17px;color:var(--s3)}
+.foot b{color:var(--s1);font-weight:500}
+svg text{font-family:Inter,sans-serif}
+
+/* flow */
+.flow{position:absolute;left:96px;right:96px;top:330px;height:560px}
+.node{position:absolute;background:var(--card);border:1px solid var(--line2);border-radius:20px;padding:20px 22px}
+.node h4{font-size:24px;font-weight:600}
+.node p{margin-top:8px;font-size:17px;line-height:1.4;color:var(--s2)}
+.node .tag{display:inline-block;margin-top:12px;font-size:14px;font-weight:600;letter-spacing:.08em;text-transform:uppercase;padding:5px 10px;border-radius:999px;border:1px solid var(--line2);color:var(--halo)}
+.node.hot{border-color:rgba(155,140,255,.6);box-shadow:0 0 40px -10px rgba(155,140,255,.55)}
+.flow svg{position:absolute;inset:0;overflow:visible}
+.lbl{font-size:15px;fill:var(--s1)}
+
+/* charts */
+.three{position:absolute;left:96px;right:96px;top:330px;display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:26px}
+.three h4{font-size:24px;font-weight:600}
+.three .why{margin-top:8px;font-size:17px;line-height:1.4;color:var(--s2);min-height:72px}
+.formula{position:absolute;left:96px;right:96px;bottom:118px;font-size:21px;color:var(--s1);text-align:center}
+.formula span{color:var(--v)}
+
+/* backtest */
+.duel{position:absolute;left:96px;top:300px;width:560px;display:grid;gap:22px}
+.duel .card{padding:26px 30px}
+.big{font-size:84px;font-weight:700;letter-spacing:-.04em;line-height:1}
+.duel .sub{margin-top:10px;font-size:19px;color:var(--s2)}
+.abl{position:absolute;right:96px;top:300px;width:640px}
+.abl h4{font-size:20px;font-weight:600;color:var(--s1)}
+.row{margin-top:22px}
+.row .t{display:flex;justify-content:space-between;font-size:18px;color:var(--s1)}
+.row .t b{font-weight:600}
+.bar{position:relative;height:30px;margin-top:9px;background:rgba(196,204,230,.06);border-radius:8px}
+.bar .zero{position:absolute;top:-6px;bottom:-6px;width:2px;background:var(--line2)}
+.bar .f{position:absolute;top:0;bottom:0;border-radius:6px}
+.stats{position:absolute;right:96px;width:640px;top:735px;display:grid;grid-template-columns:repeat(4,1fr);gap:12px}
+.stats div{border:1px solid var(--line);border-radius:14px;padding:14px}
+.stats b{display:block;font-size:26px;font-weight:600}
+.stats span{font-size:14px;color:var(--s2);line-height:1.3;display:block;margin-top:4px}
+
+/* tranches */
+.water{position:absolute;left:96px;top:340px;width:690px;height:540px}
+.tr{position:absolute;left:0;right:0;border-radius:22px;padding:26px 30px;border:1px solid var(--line2)}
+.tr h4{font-size:30px;font-weight:600;display:flex;justify-content:space-between;align-items:center}
+.tr h4 small{font-size:15px;font-weight:600;letter-spacing:.1em;text-transform:uppercase;padding:6px 12px;border-radius:999px;border:1px solid var(--line2)}
+.tr p{margin-top:12px;font-size:19px;line-height:1.45;color:var(--s2)}
+.side{position:absolute;right:96px;top:340px;width:560px;display:grid;gap:18px}
+.side .card h4{font-size:21px;font-weight:600}
+.side .card p{margin-top:8px;font-size:18px;line-height:1.45;color:var(--s2)}
+.arrowcol{position:absolute;left:820px;top:350px;height:520px;width:40px}
+
+/* live */
+.grid2{position:absolute;left:96px;right:96px;top:330px;display:grid;grid-template-columns:1.15fr 1fr;gap:26px}
+.kv{display:grid;grid-template-columns:200px 1fr;row-gap:14px;font-size:18px;margin-top:16px}
+.kv dt{color:var(--s2)} .kv dd{color:var(--s0)}
+.caps{display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-top:16px}
+.caps div{border:1px solid var(--line);border-radius:14px;padding:14px 16px}
+.caps b{display:block;font-size:30px;font-weight:600}
+.caps span{font-size:15px;color:var(--s2)}
+.card h3{font-size:22px;font-weight:600}
+.loop{margin-top:14px;display:grid;gap:12px}
+.loop div{display:grid;grid-template-columns:38px 1fr;gap:12px;align-items:start;font-size:18px;line-height:1.4;color:var(--s1)}
+.loop i{font-style:normal;width:34px;height:34px;border-radius:50%;display:grid;place-items:center;font-weight:700;font-size:16px;color:#0b0b1a;background:var(--moon)}
+
+/* screenshot frames */
+.shot{position:absolute;left:150px;right:150px;top:270px;border-radius:18px;overflow:hidden;border:1px solid var(--line2);
+  box-shadow:0 30px 90px -20px rgba(108,92,231,.55),0 0 0 1px rgba(255,255,255,.04)}
+.shot img{display:block;width:100%}
+.shot.crop{height:660px}
+.shot.crop img{object-fit:cover;object-position:top}
+.callout{position:absolute;background:rgba(9,11,22,.92);border:1px solid rgba(155,140,255,.6);border-radius:14px;padding:12px 16px;
+  font-size:17px;line-height:1.35;color:var(--s1);max-width:300px;box-shadow:0 10px 40px -10px rgba(155,140,255,.6)}
+.callout b{color:var(--s0)}
+</style></head><body>
+<canvas id="stars" width="1500" height="1000"></canvas>
+
+<!-- ============================================================ flow -->
+<section class="slide" id="flow">
+  <div class="top"><div><div class="kick">How it works</div>
+    <h2>Leverage backed by <em>real Polymarket shares.</em></h2></div><img class="logo" src="logo.svg"></div>
+  <p class="lede">Traders borrow from a tranched LP pool. Every position holds actual outcome shares, priced live from Polymarket, with a market maker that hedges each fill on Polymarket's order book.</p>
+  <div class="flow">
+    <svg viewBox="0 0 1308 560">
+      <defs><marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="#c9c2ff"/></marker></defs>
+      <g stroke="#c9c2ff" stroke-width="2" fill="none" marker-end="url(#ah)" opacity=".85">
+        <path d="M250 95 H 448"/>
+        <path d="M640 210 V 318"/>
+        <path d="M830 95 H 1038"/>
+        <path d="M1150 210 V 318"/>
+        <path d="M250 430 H 448" />
+        <path d="M640 318 V 210" opacity="0"/>
+        <path d="M1038 430 H 830" stroke-dasharray="6 6"/>
+      </g>
+      <text class="lbl" x="349" y="80" text-anchor="middle">margin + leverage</text>
+      <text class="lbl" x="655" y="270">borrows the rest</text>
+      <text class="lbl" x="934" y="80" text-anchor="middle">buys shares</text><text class="lbl" x="934" y="122" text-anchor="middle" style="fill:#737a93">oracle ± 1.5%</text>
+      <text class="lbl" x="1165" y="270">hedges each fill</text>
+      <text class="lbl" x="349" y="415" text-anchor="middle">deposit USDC.e</text>
+      <text class="lbl" x="934" y="415" text-anchor="middle">prices, liquidations</text>
+    </svg>
+    <div class="node" style="left:0;top:20px;width:250px"><h4>Trader</h4><p>Long YES or NO, up to 4×.</p></div>
+    <div class="node hot" style="left:448px;top:0;width:382px"><h4>PositionManager</h4><p>Holds the outcome shares as collateral. Open, close, liquidate, settle at resolution.</p></div>
+    <div class="node" style="left:1038px;top:0;width:270px"><h4>Market maker</h4><p>YES + NO inventory split from USDC.e, so it stays flat.</p></div>
+    <div class="node" style="left:0;top:355px;width:250px"><h4>Lenders</h4><p>Pick senior (protected) or junior (first loss, more yield).</p></div>
+    <div class="node hot" style="left:448px;top:318px;width:382px"><h4>Lending pool + RiskEngine</h4><p>Senior/junior tranches. Leverage limits move with price, time to resolution and volatility.</p></div>
+    <div class="node" style="left:1038px;top:318px;width:270px"><h4>Keeper + Polymarket</h4><p>Pushes prices on-chain, liquidates, posts hedges on the CLOB.</p><span class="tag">order book</span></div>
+  </div>
+  <div class="foot"><span>Polygon mainnet · USDC.e · Polymarket CTF</span><b>phoebe.markets</b></div>
+</section>
+
+<!-- ============================================================ risk -->
+<section class="slide" id="risk">
+  <div class="top"><div><div class="kick">Risk engine</div>
+    <h2>Leverage leaves <em>before the jump.</em></h2></div><img class="logo" src="logo.svg"></div>
+  <p class="lede">Prediction markets don't drift, they jump, and every one ends at 0 or 1. So the allowed leverage is the tightest of three limits, each aimed at where the jumps happen.</p>
+  <div class="three">
+    <div class="card"><h4>Price band</h4><p class="why">Near 1 the only move left is a crash. Near 0 it's a lottery ticket.</p><svg id="c-price" viewBox="0 0 380 250" style="width:100%"></svg></div>
+    <div class="card"><h4>Time to resolution</h4><p class="why">Ramps to zero a day out, so no leverage meets the final 0/1 jump.</p><svg id="c-time" viewBox="0 0 380 250" style="width:100%"></svg></div>
+    <div class="card"><h4>Volatility</h4><p class="why">The margin cushion must cover a 2σ day plus a 10¢ jump allowance.</p><svg id="c-vol" viewBox="0 0 380 250" style="width:100%"></svg></div>
+  </div>
+  <div class="formula mono">liquidation LTV = min( <span>85% × price band × time ramp</span> , <span>1 − (2σ + 10¢) / price</span> ) · opens sit 10 pts below</div>
+  <div class="foot"><span>Max leverage shown for a fresh position · leverage = 1 / (1 − LTV)</span><b>phoebe.markets</b></div>
+</section>
+
+<!-- ============================================================ backtest -->
+<section class="slide" id="backtest">
+  <div class="top"><div><div class="kick">Backtest</div>
+    <h2>60 unseen markets. <em>Lenders profit.</em></h2></div><img class="logo" src="logo.svg"></div>
+  <p class="lede">High-volume resolved Polymarket markets never used for tuning, replayed tick by tick through the real contracts. Synthetic traders open at 90% of the allowed LTV and never exit early.</p>
+  <div class="duel">
+    <div class="card"><div class="muted" style="font-size:18px">Naive lender · flat 75% LTV</div><div class="big" style="color:var(--loss)">−$7.98M</div><div class="sub">LP P&amp;L summed over 60 pools of $1M</div></div>
+    <div class="card" style="border-color:rgba(155,140,255,.55);box-shadow:0 0 50px -14px rgba(155,140,255,.6)"><div class="muted" style="font-size:18px">Phoebe · full risk engine</div><div class="big" style="background:var(--moon);-webkit-background-clip:text;color:transparent">+$523k</div><div class="sub">Same markets, same traders</div></div>
+  </div>
+  <div class="abl">
+    <h4>What each layer adds (LP P&amp;L, $k)</h4>
+    <div id="ablation"></div>
+  </div>
+  <div class="stats">
+    <div><b>$118M</b><span>notional replayed</span></div>
+    <div><b>$0</b><span>senior impairment</span></div>
+    <div><b>3 / 60</b><span>markets lost money</span></div>
+    <div><b>1.75%</b><span>of junior, worst market</span></div>
+  </div>
+  <div class="foot"><span>Backtests are not a forecast. The goal is a profitable lender book, not zero bad debt.</span><b>phoebe.markets</b></div>
+</section>
+
+<!-- ============================================================ tranches -->
+<section class="slide" id="tranches">
+  <div class="top"><div><div class="kick">Lenders</div>
+    <h2>Choose your risk. <em>Losses have an order.</em></h2></div><img class="logo" src="logo.svg"></div>
+  <p class="lede">Two ERC-4626 vaults share one pool. When a position goes bad, the protocol works down a fixed ladder, and junior is paid in advance to stand in front of senior.</p>
+  <div class="water">
+    <div class="tr" style="top:0;height:250px;background:linear-gradient(135deg,rgba(215,219,232,.10),rgba(17,20,38,.85))">
+      <h4>Senior <small style="color:var(--s1)">protected</small></h4>
+      <p>Paid first, impaired last. Losses reach senior only after the entire junior tranche is gone. Interest only, lower and steadier.</p>
+    </div>
+    <div class="tr" style="top:280px;height:250px;background:linear-gradient(135deg,rgba(155,140,255,.22),rgba(17,20,38,.85));border-color:rgba(155,140,255,.55)">
+      <h4>Junior <small style="color:var(--halo)">first loss</small></h4>
+      <p>Takes bad debt first. Paid for it: higher interest, plus 0.3% of every borrow and 2% of every liquidation. Can't withdraw below 20% of outstanding debt.</p>
+    </div>
+  </div>
+  <div class="side">
+    <div class="card"><h4>1 · Liquidation</h4><p>Liquidator repays the debt and takes the shares. The bonus starts at 3% and rises 1% per hour, up to 15%, until someone takes it.</p></div>
+    <div class="card"><h4>2 · Absorb</h4><p>Too far gone to liquidate profitably? The pool takes the shares as inventory; the shortfall is written off against junior.</p></div>
+    <div class="card"><h4>3 · Settlement</h4><p>Anything left at resolution redeems on Polymarket's contract at the real payout. Debt is paid first.</p></div>
+  </div>
+  <div class="foot"><span>Interest scales with utilization · new borrowing stops if junior coverage gets thin</span><b>phoebe.markets</b></div>
+</section>
+
+<!-- ============================================================ live -->
+<section class="slide" id="live">
+  <div class="top"><div><div class="kick">Live on Polygon</div>
+    <h2>Real money. <em>Real execution.</em></h2></div><img class="logo" src="logo.svg"></div>
+  <p class="lede">Deployed to Polygon mainnet with USDC.e, the token Polymarket's shares redeem for. Small hard caps while unaudited.</p>
+  <div class="grid2">
+    <div class="card"><h3>The hedge loop</h3>
+      <div class="loop">
+        <div><i>1</i><span>Split USDC.e into matched YES + NO pairs on Polymarket's contract: inventory with no market risk.</span></div>
+        <div><i>2</i><span>A trader opens a position; the venue sells them shares at the oracle price ± 1.5%.</span></div>
+        <div><i>3</i><span>Within a tick, the hedger buys the same amount back on Polymarket's order book: fill-or-kill, within 2¢.</span></div>
+        <div><i>4</i><span>Polymarket down, region blocked or exposure unhedged? The venue switches itself off.</span></div>
+      </div>
+    </div>
+    <div class="card"><h3>Launch caps</h3>
+      <div class="caps">
+        <div><b>$200 / $100</b><span>senior / junior deposits</span></div>
+        <div><b>$40</b><span>max position (margin + borrow)</span></div>
+        <div><b>$60</b><span>per hedge order</span></div>
+        <div><b>4×</b><span>max leverage, calm markets</span></div>
+      </div>
+      <dl class="kv mono" style="font-size:15px;grid-template-columns:150px 1fr">
+        <dt style="font-family:Inter">PositionManager</dt><dd>0x5c1A…CF59</dd>
+        <dt style="font-family:Inter">Lending pool</dt><dd>0x2846…b032</dd>
+        <dt style="font-family:Inter">Venue</dt><dd>0x6116…661D</dd>
+      </dl>
+    </div>
+  </div>
+  <div class="foot"><span>Guardian pause blocks new positions and deposits; closes, liquidations and settlement always work</span><b>phoebe.markets</b></div>
+</section>
+
+<!-- ============================================================ screenshot slides -->
+<section class="slide" id="app-trade">
+  <div class="kick">The app</div><h2 style="font-size:46px">Every limit, <em>explained live.</em></h2>
+  <div class="shot crop"><img src="shot-amoy.png"></div>
+  <div class="callout" style="right:150px;top:96px;max-width:520px"><b>Why this cap?</b> The app breaks the leverage limit into price band, time ramp and volatility, read straight from the contracts. Here volatility is the binding limit.</div>
+</section>
+<section class="slide" id="app-lp">
+  <div class="kick">The app</div><h2 style="font-size:46px">Lend with <em>a chosen risk.</em></h2>
+  <div class="shot crop"><img src="shot-lp.png"></div>
+</section>
+
+<script>
+const x=document.getElementById('stars').getContext('2d');let s=11;const r=()=>(s=s*16807%2147483647)/2147483647;
+for(let i=0;i<360;i++){const X=r()*1500,Y=r()*1000,R=r()<.92?.4+r()*.7:1+r()*.8,a=.15+r()*.45,h=r();
+x.fillStyle=h<.75?`rgba(230,234,248,${a})`:h<.9?`rgba(190,180,255,${a})`:`rgba(160,205,255,${a})`;x.beginPath();x.arc(X,Y,R,0,7);x.fill()}
+
+const id=(location.hash||'#flow').slice(1);document.getElementById(id).classList.add('on');
+
+// ---- leverage curves (mirror RiskEngine: liq = min(0.85*pf*tf, volcap); max = liq-0.10; lev = 1/(1-max))
+const lev=l=>{const m=Math.max(0,l-0.10);return 1/(1-m)};
+const pf=p=>p<=.03||p>=.97?0:p<.15?(p-.03)/.12:p>.85?(.97-p)/.12:1;
+function chart(svgId,xs,f,xl,fmt,ticks){
+  const el=document.getElementById(svgId),W=380,H=250,L=44,R=12,T=14,B=40,ns='http://www.w3.org/2000/svg';
+  const X=v=>L+(v-xs[0])/(xs[1]-xs[0])*(W-L-R),Y=v=>T+(1-(v-1)/3)*(H-T-B);
+  const add=(t,a)=>{const e=document.createElementNS(ns,t);for(const k in a)e.setAttribute(k,a[k]);el.appendChild(e);return e};
+  for(const g of [1,2,3,4]){add('line',{x1:L,x2:W-R,y1:Y(g),y2:Y(g),stroke:'rgba(196,204,230,.10)'});
+    add('text',{x:L-10,y:Y(g)+5,'text-anchor':'end','font-size':14,fill:'#737a93'}).textContent=g+'×'}
+  for(const t of ticks) add('text',{x:X(t),y:H-14,'text-anchor':'middle','font-size':14,fill:'#737a93'}).textContent=fmt(t);
+  add('text',{x:W-R,y:H-0,'text-anchor':'end','font-size':13,fill:'#a9afc4'}).textContent=xl;
+  let d='',a='';for(let i=0;i<=200;i++){const v=xs[0]+(xs[1]-xs[0])*i/200,y=Y(Math.max(1,f(v)));d+=(i?'L':'M')+X(v).toFixed(1)+' '+y.toFixed(1)}
+  a=d+`L${X(xs[1])} ${Y(1)}L${X(xs[0])} ${Y(1)}Z`;
+  const gid=svgId+'g';const defs=add('defs',{});defs.innerHTML=`<linearGradient id="${gid}" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#9b8cff" stop-opacity=".35"/><stop offset="1" stop-color="#9b8cff" stop-opacity="0"/></linearGradient><linearGradient id="${gid}l" x1="0" y1="0" x2="1" y2="0"><stop offset="0" stop-color="#c9c2ff"/><stop offset="1" stop-color="#6cb6ff"/></linearGradient>`;
+  add('path',{d:a,fill:`url(#${gid})`});add('path',{d,fill:'none',stroke:`url(#${gid}l)`,'stroke-width':3,'stroke-linejoin':'round'});
+}
+if(id==='risk'){
+  chart('c-price',[0,1],p=>lev(.85*pf(p)),'price',v=>Math.round(v*100)+'¢',[0,.25,.5,.75,1]);
+  chart('c-time',[7,0],t=>lev(.85*(t<=1?0:t>=4?1:(t-1)/3)),'days to resolution',v=>v+'d',[7,5,3,1,0]);
+  chart('c-vol',[0,.15],sg=>lev(Math.min(.85,1-(2*sg+.10)/.5)),'1-day σ at a 50¢ price',v=>Math.round(v*100)+'¢',[0,.05,.1,.15]);
+}
+if(id==='backtest'){
+  const rows=[['Naive, flat 75% LTV',-7980,'var(--loss)'],['Bands + time ramp + volatility',-15,'#d7dbe8'],['+ 0.3% opening fee to junior',260,'#c9c2ff'],['Full: + jump cap, absorb, auction, caps',523,'url']];
+  const lo=-600,hi=600,pc=v=>(v-lo)/(hi-lo)*100,z=pc(0);
+  document.getElementById('ablation').innerHTML=rows.map(([t,v,c])=>{const clip=v<lo;const a=pc(Math.max(v,lo)),l=Math.min(a,z),w=Math.abs(a-z);
+    const bg=c==='url'?'linear-gradient(90deg,#c9c2ff,#9b8cff,#6cb6ff)':c;
+    return `<div class="row"><div class="t"><span>${t}</span><b style="color:${v<0?'var(--loss)':'var(--gain)'}">${v>0?'+':''}${v.toLocaleString('en-US')}k</b></div>
+      <div class="bar"><div class="zero" style="left:${z}%"></div><div class="f" style="left:${l}%;width:${w}%;background:${bg}${clip?';-webkit-mask:linear-gradient(90deg,transparent 0,#000 18%)':''}"></div>${clip?'<span style="position:absolute;left:8px;top:4px;font-size:15px;color:#ffb3bd">◀ off scale</span>':''}</div></div>`}).join('');
+}
+</script>
+</body></html>
