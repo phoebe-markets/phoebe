@@ -1,0 +1,43 @@
+<!doctype html>
+<html><head><meta charset="utf-8">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+*{box-sizing:border-box;margin:0}
+html,body{width:1600px;height:640px;overflow:hidden;background:#07080f}
+body{position:relative;font-family:Inter,sans-serif;color:#f4f6fb}
+canvas{position:absolute;inset:0}
+.art{position:absolute;right:-120px;top:-10px;width:1120px;aspect-ratio:1024/572;
+  mask-image:linear-gradient(180deg,#000 60%,transparent 99%),linear-gradient(90deg,transparent 0%,#000 14%,#000 82%,transparent);
+  mask-composite:intersect}
+.lines,.glow::before{position:absolute;inset:0;
+  mask:url(phoebe-line.svg) center/100% 100% no-repeat;
+  background:radial-gradient(40% 55% at 15% 72%,#fff 0%,rgba(255,255,255,0) 70%),
+    linear-gradient(105deg,#c9c2ff 0%,#e9ecf5 30%,#a9afc4 55%,#9b8cff 78%,#6cb6ff 100%)}
+.lines{opacity:.66}
+.glow{position:absolute;inset:0;filter:blur(8px);opacity:.75}
+.glow::before{content:""}
+.lantern{position:absolute;left:14.6%;top:72%;width:64%;aspect-ratio:1;transform:translate(-50%,-50%);border-radius:50%;
+  background:radial-gradient(circle,#fff 0%,rgba(232,228,255,.85) 4%,rgba(185,172,255,.5) 10%,rgba(155,140,255,.26) 22%,rgba(108,182,255,.12) 40%,transparent 68%);
+  mix-blend-mode:screen}
+.copy{position:absolute;left:90px;top:120px}
+.logo{width:560px;display:block;filter:drop-shadow(0 0 30px rgba(155,140,255,.35))}
+h1{margin-top:44px;font-weight:600;font-size:64px;line-height:1.02;letter-spacing:-.035em;max-width:760px}
+h1 em{font-style:normal;background:linear-gradient(115deg,#f4f6fb 0%,#c9c2ff 38%,#9b8cff 62%,#6cb6ff 100%);-webkit-background-clip:text;color:transparent}
+p{margin-top:22px;font-size:25px;line-height:1.4;color:#a9afc4;max-width:600px}
+.url{display:none;position:absolute;right:96px;top:110px;font-size:22px;font-weight:500;color:#d7dbe8;letter-spacing:.02em;
+  padding:12px 22px;border:1px solid rgba(196,204,230,.22);border-radius:999px;background:rgba(15,18,34,.6)}
+</style></head><body>
+<canvas id="c" width="1600" height="640"></canvas>
+<div class="art"><div class="glow"></div><div class="lines"></div><div class="lantern"></div></div>
+<div class="copy">
+  <img class="logo" src="logo.svg" alt="">
+  <h1>Leverage for<br><em>prediction markets.</em></h1>
+  <p>Borrow against Polymarket outcome tokens.<br>Senior and junior tranches fund it.</p>
+</div>
+<div class="url">phoebe.markets</div>
+<script>
+const x=document.getElementById('c').getContext('2d');let s=7;const r=()=>(s=s*16807%2147483647)/2147483647;
+for(let i=0;i<420;i++){const X=r()*1600,Y=r()*640,R=r()<.92?.5+r()*.8:1.2+r()*.9,a=.25+r()*.6,h=r();
+x.fillStyle=h<.75?`rgba(230,234,248,${a})`:h<.9?`rgba(190,180,255,${a})`:`rgba(160,205,255,${a})`;x.beginPath();x.arc(X,Y,R,0,7);x.fill()}
+</script>
+</body></html>
