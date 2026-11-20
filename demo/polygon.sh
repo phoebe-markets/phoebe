@@ -67,7 +67,10 @@ case "${1:-}" in
     echo "-> deployments/polygon.json"
     ;;
   install)
-    NET=polygon POLYGON_RPC=$rpc "$root/demo/install-keeper-service.sh" earth
+    # runtime RPC for the service: drpc's free plan rejects eth_getLogs over 100 blocks, which breaks the keeper's
+    # event sync after any restart; publicnode serves 5000-block ranges (it isn't an archive node, which the keeper
+    # doesn't need)
+    NET=polygon POLYGON_RPC=${KEEPER_RPC:-https://polygon-bor-rpc.publicnode.com} "$root/demo/install-keeper-service.sh" earth
     ;;
   status)
     keeper_env; exec bun "$root/keeper/src/hedger.ts" status --ssh earth

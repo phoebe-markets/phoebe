@@ -6,7 +6,7 @@
 #   demo/site.sh tls        # one-time, once DNS points at earth: certbot for phoebe.markets + www
 #
 #   VITE_DEFAULT_NET   default network for visitors (polygon; ?net=amoy still works)
-#   VITE_POLYGON_RPC   browser RPC for Polygon (default https://polygon.drpc.org)
+#   VITE_POLYGON_RPC   browser RPC for Polygon (default publicnode: drpc free rejects eth_getLogs over 100 blocks)
 set -euo pipefail
 root=$(cd "$(dirname "$0")/.." && pwd)
 host=${SITE_HOST:-earth}
@@ -19,7 +19,7 @@ fi
 
 (cd "$root/contracts" && forge build >/dev/null)
 cd "$root/web"
-VITE_DEFAULT_NET=${VITE_DEFAULT_NET:-polygon} VITE_POLYGON_RPC=${VITE_POLYGON_RPC:-https://polygon.drpc.org} npx vite build >/dev/null
+VITE_DEFAULT_NET=${VITE_DEFAULT_NET:-polygon} VITE_POLYGON_RPC=${VITE_POLYGON_RPC:-https://polygon-bor-rpc.publicnode.com} npx vite build >/dev/null
 [ -f dist/deployments/polygon.json ] || echo "warning: no deployments/polygon.json yet; the Polygon network won't load until demo/polygon.sh deploy"
 stamp=$(date +%Y%m%d%H%M%S)
 tar -C dist -czf - . | ssh -o BatchMode=yes "$host" "set -e; d=/var/www/phoebe-$stamp; mkdir -p \$d; tar -C \$d -xzf -; chmod -R a+rX \$d
